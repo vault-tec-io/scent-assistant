@@ -385,6 +385,15 @@ CLOUD_ENDPOINT_DEVICES = "/v1/app/device/listAll/{user_id}"
 CLOUD_ENDPOINT_SWITCH = "/v1/app/data/newSwitch"
 CLOUD_ENDPOINT_STATUS = "/v1/app/device/work/{device_id}"
 CLOUD_ENDPOINT_SCHEDULE = "/v1/app/data/workSetApp"
+# Schedule read-back. The app's GET_WEEK_WORK_TIME_URL — one call per
+# weekday, returning that day's work-time slots.
+CLOUD_ENDPOINT_WORK_TIME = "/v1/app/device/newWorkTime/{device_id}"
+
+# How many cloud polls to skip between schedule read-backs. The schedule
+# only changes when someone edits it, so re-reading it every poll would
+# double our request rate against the vendor's API for nothing; once
+# every 10 polls still picks up an app-side edit within minutes.
+CLOUD_SCHEDULE_REFRESH_EVERY = 10
 
 # Polling interval for cloud-mode devices. The integration previously had no
 # periodic refresh, so HA never observed autonomous spray cycles between

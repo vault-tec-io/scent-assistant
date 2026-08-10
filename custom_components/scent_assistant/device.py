@@ -18,6 +18,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     DeviceType,
+    CLOUD_SCHEDULE_REFRESH_EVERY,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
     DEFAULT_PAUSE_DURATION,
@@ -122,6 +123,9 @@ class ScentDiffuserDevice:
         # Cloud
         self._cloud: AromaLinkCloudClient | None = cloud_client
         self._cloud_device_id = cloud_device_id
+        # Counts cloud refreshes so the schedule read-back can run on the
+        # first one and then only every CLOUD_SCHEDULE_REFRESH_EVERY.
+        self._cloud_schedule_poll_count = 0
 
         # State
         self._state = DiffuserState()
@@ -1141,6 +1145,50 @@ class ScentDiffuserDevice:
                 if status.get("battery") is not None:
                     self._state.battery = status["battery"]
                 self._notify_state_changed()
+
+            await self._refresh_cloud_schedule()
+
+    async def _refresh_cloud_schedule(self) -> None:
+        """Read the schedule the device holds back from the cloud.
+
+        `get_status` reports what the device is doing right now but not
+        what it is scheduled to do, so without this the Start/End Time
+        and duration entities have nothing to restore from and show
+        their defaults after a restart — claiming 00:00–23:59 while the
+        device happily runs 08:00–21:30.
+
+        The schedule only changes when someone edits it, so this runs on
+        the first refresh and then every `CLOUD_SCHEDULE_REFRESH_EVERY`
+        polls rather than on every one.
+        """
+        if not (self.supports_cloud and self._cloud):
+            return
+        due = (
+            self._cloud_schedule_poll_count % CLOUD_SCHEDULE_REFRESH_EVERY == 0
+        )
+        self._cloud_schedule_poll_count += 1
+        if not due:
+            return
+
+        # 1=Mon … 7=Sun, matching set_schedule's numbering. We write the
+        # same schedule to every weekday, so reading today's is enough.
+        weekday = datetime.now().weekday() + 1
+        schedule = await self._cloud.get_schedule(self._cloud_device_id, weekday)
+        if not schedule:
+            return
+
+        for field in (
+            "start_hour",
+            "start_minute",
+            "end_hour",
+            "end_minute",
+            "work_seconds",
+            "pause_seconds",
+            "schedule_enabled",
+        ):
+            if field in schedule:
+                setattr(self._state, field, schedule[field])
+        self._notify_state_changed()
 
     async def sync_time(self) -> bool:
         """Sync device clock to current local time (BLE only)."""
