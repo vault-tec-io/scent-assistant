@@ -120,6 +120,14 @@ SM_AK_RESP_FIRMWARE_V3 = 0x44         # response to CB (same opcode as our exist
 SM_AK_RESP_CONTROL = 0x4D             # control bitmask push/read (V2: 4D mask, V3: 4D 01 mask)
 SM_AK_RESP_GRADE_TABLE = 0x47         # response to C3: 47 + N×(work_u16 pause_u16), @Mins95 #8
 
+# Offset 1 of the V3 schedule frame (2A write / 4A read) is the diffuser
+# endpoint. Single-pump units always report 01; the A309 has three
+# independently programmable pumps and pushes a full slot set per
+# endpoint (@danieledwardgeorgehitchcock, #22). We write to the first one
+# only, so we read that one only — see the 4A branch of
+# `parse_notification`.
+SM_AK_V3_PRIMARY_ENDPOINT = 0x01
+
 # AK control-state bitmask layout (LSB = onOff). Mirrors writeTotalControl()
 # which builds a binary string "lock|lamp|1|demo|fan|onOff" → int(s, 2).
 SM_AK_CTRL_BIT_ONOFF = 0

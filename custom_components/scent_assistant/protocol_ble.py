@@ -23,6 +23,7 @@ from .const import (
     SM_AK_CMD_V3_READ_OIL, SM_AK_CMD_V3_READ_OIL_INFO, SM_AK_CMD_V3_READ_FIRMWARE,
     SM_AK_CMD_V3_READ_CONTROL, SM_AK_CMD_V3_READ_MODEL,
     SM_AK_CMD_V3_READ_GRADE_TABLE, SM_AK_RESP_GRADE_TABLE,
+    SM_AK_V3_PRIMARY_ENDPOINT,
     SM_AK_RESP_SCHEDULE_V3, SM_AK_RESP_DEVICE_NAME_V3,
     SM_AK_RESP_LABEL_V3, SM_AK_RESP_MODEL_V3,
     SM_AK_CTRL_BIT_ONOFF, SM_AK_CTRL_BIT_FAN, SM_AK_CTRL_BIT_DEMO,
@@ -1332,6 +1333,23 @@ class ScentMarketingAkProtocol(BleProtocol):
                 result["schedule_enabled"] = True
 
         elif op == SM_AK_RESP_SCHEDULE_V3 and len(data) >= 14:
+            # Offset 1 is the diffuser endpoint. Single-pump units report
+            # a constant 01 here, but multi-pump models like the A309
+            # carry three independently programmable diffusers and push
+            # one set of slots per endpoint — 15 frames in total
+            # (@danieledwardgeorgehitchcock, #22). Absorbing all of them
+            # into one state means endpoint 2 and 3 overwrite endpoint
+            # 1's schedule, so HA displays the last endpoint that
+            # happened to push while our writes (2A 01 …) still go to the
+            # first one: the user edits something other than what they
+            # see.
+            #
+            # Until each endpoint gets its own entities, keep to the one
+            # we actually write to. Skip only endpoints above the first,
+            # so a variant that numbers its sole pump 00 still works.
+            if data[1] > SM_AK_V3_PRIMARY_ENDPOINT:
+                return result
+
             # V3 schedule slot read-back, response to C5 / CA01XX:
             #     4A 01 02 FF FE SS EE HH MM HH MM DD 00 LL 00 0F 01 2C
             # where FF (offset 3) carries the fan state and FE (offset
