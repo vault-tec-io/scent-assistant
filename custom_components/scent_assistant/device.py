@@ -88,6 +88,10 @@ class ScentDiffuserDevice:
         self._ble_client: BleakClient | None = None
         self._ble_connected = False
         self._ble_notify_subscribed = False
+        # Whether the write characteristic wants a GATT response —
+        # resolved from the device's own GATT table on first write and
+        # cached for the lifetime of the connection.
+        self._ble_write_response: bool | None = None
         self._ble_lock = asyncio.Lock()
         self._ble_disconnect_task: asyncio.Task | None = None
         self._ble_has_synced_time = False
@@ -156,6 +160,16 @@ class ScentDiffuserDevice:
     @property
     def recent_commands(self) -> list[str]:
         return list(self._recent_commands)
+
+    @property
+    def ble_write_response(self) -> bool | None:
+        """Write mode resolved from the device's GATT table.
+
+        `None` until the first BLE write of a connection. Surfaced in
+        diagnostics because a unit that only accepts
+        write-without-response looks identical to a dead one otherwise.
+        """
+        return self._ble_write_response
 
     @property
     def model_name(self) -> str:
@@ -499,6 +513,46 @@ class ScentDiffuserDevice:
                 )
         self._ble_client = None
         self._ble_connected = False
+        self._ble_write_response = None
+
+    def _write_needs_response(self) -> bool:
+        """Decide whether writes to this device need a GATT response.
+
+        Most supported units declare `WRITE` on their write
+        characteristic and answer a with-response write happily. Some
+        rebadged ones don't: the YOOAI-OEM Aromely variant sold as
+        "SPACE-BLE" declares *only* `write-without-response` on FFE2, so
+        every with-response write is rejected with GATT error 3 and the
+        handshake never completes.
+
+        So honour whatever the characteristic actually declares, and
+        fall back to with-response whenever the GATT table can't be
+        resolved — that is the behaviour every currently-supported
+        device was verified against.
+        """
+        if self._ble_write_response is not None:
+            return self._ble_write_response
+        with_response = True
+        try:
+            char = self._ble_client.services.get_characteristic(
+                self._protocol.write_char_uuid
+            )
+            if char is not None:
+                props = [str(p).lower() for p in (char.properties or [])]
+                if props and "write" not in props:
+                    with_response = False
+                    _LOGGER.debug(
+                        "BLE write char %s on %s is write-without-response "
+                        "only (props=%s) — writing without response",
+                        self._protocol.write_char_uuid, self._ble_name, props,
+                    )
+        except Exception as err:
+            _LOGGER.debug(
+                "Could not resolve write properties for %s on %s: %s",
+                self._protocol.write_char_uuid, self._ble_name, err,
+            )
+        self._ble_write_response = with_response
+        return with_response
 
     async def _ble_send(self, data: bytes) -> bool:
         """Send a command via BLE.
@@ -521,9 +575,10 @@ class ScentDiffuserDevice:
             self._recent_commands.append(data.hex())
             if len(self._recent_commands) > 10:
                 del self._recent_commands[0]
+        with_response = self._write_needs_response()
         for chunk in chunks:
             await self._ble_client.write_gatt_char(
-                self._protocol.write_char_uuid, chunk, response=True
+                self._protocol.write_char_uuid, chunk, response=with_response
             )
         return True
 

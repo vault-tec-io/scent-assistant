@@ -85,6 +85,7 @@ async def async_get_config_entry_diagnostics(
             "model": device.model_name if device else None,
             "available": device.available if device else None,
             "connection_mode": device.connection_mode if device else None,
+            "ble_write_response": device.ble_write_response if device else None,
             "supports_fan": device.supports_fan if device else None,
             "supports_cloud": device.supports_cloud if device else None,
         },
