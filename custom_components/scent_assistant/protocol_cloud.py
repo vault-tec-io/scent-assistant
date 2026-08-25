@@ -18,6 +18,7 @@ from .const import (
     CLOUD_ENDPOINT_SWITCH,
     CLOUD_ENDPOINT_STATUS,
     CLOUD_ENDPOINT_SCHEDULE,
+    CLOUD_ENDPOINT_WORK_TIME,
     CLOUD_WEB_URL,
 )
 
@@ -600,6 +601,31 @@ class AromaLinkCloudClient:
             "work_remain": info.get("workRemainTime"),
             "pause_remain": info.get("pauseRemainTime"),
         }
+
+        # The work-status payload also carries the configured schedule
+        # window and durations (@b4rtimp's device reports startTime
+        # "06:00" / endTime "21:30" / workTime 15 / pauseTime 120, #24).
+        # Taking them from here is both cheaper and more trustworthy than
+        # the separate schedule endpoint: it costs no extra request and
+        # it's the device's own live configuration rather than a slot
+        # list whose layout we have to pick from.
+        start = AromaLinkCloudClient._parse_time(info.get("startTime"))
+        if start is not None:
+            result["start_hour"], result["start_minute"] = start
+        end = AromaLinkCloudClient._parse_time(info.get("endTime"))
+        if end is not None:
+            result["end_hour"], result["end_minute"] = end
+
+        for key, field in (("work_seconds", "workTime"), ("pause_seconds", "pauseTime")):
+            raw = info.get(field)
+            if raw is None:
+                continue
+            try:
+                seconds = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if seconds > 0:
+                result[key] = seconds
 
         # Oil level: the cloud reports `remainOil`, but its unit depends
         # on the device. Per the official app's updateRemainOil() it is

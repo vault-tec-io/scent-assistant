@@ -1126,6 +1126,7 @@ class ScentDiffuserDevice:
             return
 
         if self.supports_cloud and self._cloud:
+            got_schedule_from_status = False
             status = await self._cloud.get_status(self._cloud_device_id)
             if status:
                 if "power" in status and status["power"] is not None:
@@ -1144,9 +1145,22 @@ class ScentDiffuserDevice:
                     self._state.oil_remaining = status["oil_remaining"]
                 if status.get("battery") is not None:
                     self._state.battery = status["battery"]
+                # The status payload usually carries the configured
+                # window and durations too — cheaper and more direct
+                # than the separate schedule endpoint (#24).
+                for field in (
+                    "start_hour", "start_minute", "end_hour", "end_minute",
+                    "work_seconds", "pause_seconds",
+                ):
+                    if field in status:
+                        setattr(self._state, field, status[field])
+                        got_schedule_from_status = True
                 self._notify_state_changed()
 
-            await self._refresh_cloud_schedule()
+            # Only fall back to the dedicated schedule endpoint when the
+            # status payload didn't carry the window itself.
+            if not got_schedule_from_status:
+                await self._refresh_cloud_schedule()
 
     async def _refresh_cloud_schedule(self) -> None:
         """Read the schedule the device holds back from the cloud.
