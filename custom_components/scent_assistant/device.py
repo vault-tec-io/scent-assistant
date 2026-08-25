@@ -1154,7 +1154,12 @@ class ScentDiffuserDevice:
                 ):
                     if field in status:
                         setattr(self._state, field, status[field])
-                        got_schedule_from_status = True
+                # The fallback exists to supply the window, so only skip
+                # it once we actually have one — a payload carrying just
+                # the durations shouldn't suppress it.
+                got_schedule_from_status = (
+                    "start_hour" in status and "end_hour" in status
+                )
                 self._notify_state_changed()
 
             # Only fall back to the dedicated schedule endpoint when the
