@@ -206,6 +206,16 @@ BLE_NAME_PATTERNS = {
     # are detected via the AF30 service / manufacturer data instead, but
     # some expose "DiffuserAroMax" directly — match that as a fallback.
     DeviceType.AROMELY_ARO_MAX: ["DiffuserAroMax", "DiffuserAro"],
+    # "SA_" — Scent Marketing AK sold under other brands (AromaTech
+    # Ambience SA_AT600, #29). Normally these are identified by their
+    # manufacturer data, but some units advertise none at all: just the
+    # FFF0 service UUID and the name. @kartikkp's GATT dump shows the
+    # AK shape unambiguously — FFF6 carrying read + write-without-
+    # response + notify as one command/response channel — so route the
+    # name prefix to the AK family rather than letting it fall through
+    # to the Aroma-Link default, whose FFF1-notify / FFF2-write layout
+    # these devices do not have.
+    DeviceType.SCENT_MARKETING_AK: ["SA_"],
 }
 
 # Scent Marketing devices are identified primarily by manufacturer-specific
