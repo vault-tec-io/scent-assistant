@@ -115,16 +115,18 @@ class PauseDurationNumber(NumberEntity):
 class MomentaryDurationNumber(NumberEntity):
     """Run time for the Diffuse Now button (Aroma-Link).
 
-    Held on the device manager only — resets to the default after an HA
-    restart. Configuration entity, so it lands in the device's
-    "Configuration" section rather than next to the live controls.
+    Set to 0 to disable the automatic power-off after Diffuse Now, leaving
+    the diffuser powered on. Held on the device manager only — resets to
+    the default after an HA restart. Configuration entity, so it lands in
+    the device's "Configuration" section rather than next to the live
+    controls.
     """
 
     _attr_has_entity_name = True
     _attr_name = "Momentary Duration"
     _attr_icon = "mdi:timer-cog"
     _attr_native_unit_of_measurement = "s"
-    _attr_native_min_value = 5
+    _attr_native_min_value = 0
     _attr_native_max_value = 600
     _attr_native_step = 5
     _attr_mode = NumberMode.BOX

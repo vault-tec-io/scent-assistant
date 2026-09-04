@@ -791,20 +791,28 @@ class ScentDiffuserDevice:
         return False
 
     async def momentary_diffuse(self) -> bool:
-        """Run the diffuser for `momentary_seconds`, then switch it off.
+        """Run the diffuser, optionally switching it off after a delay.
 
         There is no native one-shot command in the Aroma-Link protocol
         (verified against the decompiled official app), so this is
-        power-on followed by a delayed power-off task. Pressing again
-        while a run is active restarts the countdown.
+        power-on followed by an optional delayed power-off task. Pressing
+        again while a run is active restarts the countdown.
+
+        A Momentary Duration of 0 disables the delayed power-off, leaving
+        the diffuser powered on so its onboard schedule can continue.
         """
         if self._momentary_task and not self._momentary_task.done():
             self._momentary_task.cancel()
+        self._momentary_task = None
+
         if not await self.set_power(True):
             return False
-        self._momentary_task = asyncio.ensure_future(
-            self._momentary_off_later(self.momentary_seconds)
-        )
+
+        if self.momentary_seconds > 0:
+            self._momentary_task = asyncio.ensure_future(
+                self._momentary_off_later(self.momentary_seconds)
+            )
+
         return True
 
     async def _momentary_off_later(self, delay: int) -> None:
