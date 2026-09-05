@@ -1155,9 +1155,15 @@ class ScentDiffuserDevice:
                     if oil_query is not None:
                         await self._ble_send(oil_query())
                         await asyncio.sleep(0.3)
-                    work_query = getattr(self._protocol, "build_all_work_query", None)
-                    if work_query is not None:
-                        await self._ble_send(work_query())
+                    # Configured work/pause durations live in a separate
+                    # per-weekday register on Aroma-Link (the status frame
+                    # only carries the *remaining* times). We write every
+                    # weekday identically, so today's is representative.
+                    # Device weekday numbering: 0 = Sun, 1 = Mon … 6 = Sat.
+                    freq_query = getattr(self._protocol, "build_work_frequency_query", None)
+                    if freq_query is not None:
+                        weekday = (datetime.now().weekday() + 1) % 7
+                        await self._ble_send(freq_query(weekday))
                         await asyncio.sleep(0.3)
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
