@@ -357,6 +357,13 @@ class AromaLinkBleProtocol(BleProtocol):
 
     device_type = DeviceType.AROMA_LINK
 
+    def __init__(self) -> None:
+        self._notification_buffer = bytearray()
+
+    def reset_notifications(self) -> None:
+        """Discard incomplete replies when a BLE session ends."""
+        self._notification_buffer.clear()
+
     @staticmethod
     def _xor_checksum(payload: bytes) -> int:
         result = 0
@@ -380,6 +387,10 @@ class AromaLinkBleProtocol(BleProtocol):
 
     def build_query(self) -> bytes:
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_QUERY_SCHEDULES]))
+
+    def build_fan_query(self) -> bytes:
+        """Read fan state, as the vendor app does on connection (52 03)."""
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_FAN]))
 
     def build_oil_query(self) -> bytes:
         """Read the liquid/oil level register (`52 1E`).
@@ -444,15 +455,43 @@ class AromaLinkBleProtocol(BleProtocol):
         return True
 
     def parse_notification(self, data: bytes) -> dict:
-        """Parse Aroma-Link notification packets."""
+        """Reassemble framed replies across arbitrary GATT notification sizes."""
+        buffer = self._notification_buffer
+        buffer.extend(data)
         result: dict = {}
+        while buffer:
+            start = buffer.find(AL_HEADER)
+            if start < 0:
+                # Keep a header split across notifications; discard noise.
+                keep = next((n for n in (2, 1) if buffer.endswith(AL_HEADER[:n])), 0)
+                if keep:
+                    del buffer[:-keep]
+                else:
+                    buffer.clear()
+                break
+            if start:
+                del buffer[:start]
+            end = buffer.find(AL_TRAILER, 4)
+            next_start = buffer.find(AL_HEADER, 3)
+            if next_start >= 0 and (end < 0 or next_start < end):
+                del buffer[:next_start]
+                continue
+            if end < 0:
+                # Largest known replies are well below 512 bytes. Bound a
+                # damaged stream rather than retaining it for the session.
+                if len(buffer) > 512:
+                    buffer.clear()
+                break
+            payload = bytes(buffer[4:end])
+            checksum = buffer[3]
+            del buffer[:end + len(AL_TRAILER)]
+            if self._xor_checksum(payload) == checksum:
+                result.update(self._parse_payload(payload))
+        return result
 
-        # Strip header/trailer if present
-        if data[:3] == AL_HEADER and data[-3:] == AL_TRAILER:
-            payload = data[4:-3]  # skip header(3) + xor(1), trim trailer(3)
-        else:
-            payload = data
-
+    def _parse_payload(self, payload: bytes) -> dict:
+        """Decode a complete, checksum-validated Aroma-Link payload."""
+        result: dict = {}
         if len(payload) < 2:
             return result
 
@@ -468,11 +507,20 @@ class AromaLinkBleProtocol(BleProtocol):
         #   [17..18] start HH MM  [19..20] end HH MM  [21] air pump
         #   [22..27] MAC  [28..29] raw oil weight  [30] battery
         #   [31] has-battery flag  [32..] more capability flags
-        # We deliberately skip power/fan/lamp here: the official app gets
-        # those from the dedicated 53 08 / 53 03 frames too, and the
-        # nibble encoding at [10] conflicts with the 0x10 fan value seen
-        # on the 53 03 path — not worth the risk without a live device.
+        # Read fan separately via 52 03: do not guess the fan/lamp nibbles.
         if sub == AL_SUB_ALL_WORK_INFO and cmd in (AL_CMD_STATUS, AL_CMD_QUERY):
+            if len(payload) < 22:
+                return result
+            if payload[11] in (0, 1):
+                result["power"] = bool(payload[11])
+                if not result["power"]:
+                    result["phase"] = "off"
+                elif payload[12] in (AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED):
+                    result["phase"] = {
+                        AL_PHASE_IDLE: "idle",
+                        AL_PHASE_SPRAYING: "spraying",
+                        AL_PHASE_PAUSED: "paused",
+                    }[payload[12]]
             if len(payload) >= 17:
                 result["work_remaining"] = (payload[13] << 8) | payload[14]
                 result["pause_remaining"] = (payload[15] << 8) | payload[16]
@@ -487,6 +535,11 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["battery"] = max(0, min(100, payload[30]))
             return result
 
+        if cmd in (AL_CMD_STATUS, AL_CMD_QUERY) and sub == AL_SUB_FAN and len(payload) >= 3:
+            if payload[2] in (AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE):
+                result["fan"] = payload[2] == AL_FAN_ON_VALUE
+            return result
+
         if cmd == AL_CMD_STATUS:
             if sub == AL_SUB_POWER and len(payload) >= 3:
                 result["power"] = payload[2] == 0x01
@@ -496,7 +549,7 @@ class AromaLinkBleProtocol(BleProtocol):
             elif sub == AL_SUB_FAN and len(payload) >= 3:
                 result["fan"] = payload[2] == AL_FAN_ON_VALUE
 
-            elif sub == 0x09 and len(payload) >= 10:
+            elif sub == 0x09 and len(payload) >= 11:
                 # Spray cycle status: phase, work, pause, start, end, enabled
                 phase_byte = payload[2]
                 if phase_byte == AL_PHASE_IDLE:

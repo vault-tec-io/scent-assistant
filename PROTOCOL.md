@@ -259,6 +259,39 @@ Phase: 0x00=idle, 0x01=spraying, 0x02=paused
 53 03 [state]   <- 0x10=on, 0x00=off
 ```
 
+The app also reads fan state with `52 03`; the reply is `52 03 [state]`
+using the same encoding. This read is necessary to discover the fan's state
+without first sending a fan command.
+
+**Full status (53 0A push / 52 0A read response):**
+
+Offsets below are relative to the payload, starting at the command byte.
+
+| Offset | Meaning |
+|--------|---------|
+| 2–9 | Device date/time and weekday |
+| 10 | Fan/lamp nibbles (read fan separately; not decoded here) |
+| 11 | Power: 0 off, 1 on |
+| 12 | Phase: 0 idle, 1 spraying, 2 paused |
+| 13–14 | Work seconds remaining, big-endian |
+| 15–16 | Pause seconds remaining, big-endian |
+| 17–20 | Start HH:MM and end HH:MM |
+| 30–31 | Battery percentage and has-battery flag |
+
+These frames exceed the usual 20-byte notification payload. A U5 over an
+ESPHome proxy can deliver a single reply as 20 + 20 + remaining bytes. Keep
+the `A5 AA AC` through `C5 CC CA` frame buffered across notifications, verify
+its XOR checksum, and only then parse it. Clear incomplete frames between
+connections. One notification may also contain multiple complete frames.
+
+Live display uses the last full-status phase and remaining seconds as its
+reference, then subtracts elapsed monotonic time until a newer full-status
+reply resynchronizes it. This is an estimate between reports, not a promise
+that the hardware broadcasts once a second. The public vendor-app capture
+in [issue 18](https://github.com/mr-sparks/scent-assistant/issues/18#issuecomment-4691039360)
+confirms the initial time-sync/full-status exchange and dedicated fan read;
+it does not establish a periodic polling cadence during active diffusion.
+
 ---
 
 ## Building Packets (Python)

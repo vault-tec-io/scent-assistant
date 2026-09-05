@@ -279,11 +279,15 @@ class DiffuserWorkRemainSensor(SensorEntity):
 
     @property
     def native_value(self) -> int | None:
-        return self._device.state.work_remaining
+        return self._device.countdown_remaining("work_remaining")
 
     @property
     def available(self) -> bool:
-        return self._device.available and self._device.state.work_remaining is not None
+        return self._device.available and self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"estimated_between_updates": self._device.live_updates}
 
 
 class DiffuserPauseRemainSensor(SensorEntity):
@@ -309,11 +313,15 @@ class DiffuserPauseRemainSensor(SensorEntity):
 
     @property
     def native_value(self) -> int | None:
-        return self._device.state.pause_remaining
+        return self._device.countdown_remaining("pause_remaining")
 
     @property
     def available(self) -> bool:
-        return self._device.available and self._device.state.pause_remaining is not None
+        return self._device.available and self.native_value is not None
+
+    @property
+    def extra_state_attributes(self) -> dict:
+        return {"estimated_between_updates": self._device.live_updates}
 
 
 class DiffuserDetectionDiagnostic(SensorEntity):

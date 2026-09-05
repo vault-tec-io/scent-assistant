@@ -15,6 +15,9 @@ gatt_discover*.py
 parse_btsnoop.py
 protocol_analysis.py
 test_*.py
+!tests/test_*.py
+.pytest_cache/
+.local/
 ble_interactive.py
 
 # Reverse-engineering working area — APKs and decompiled output (not redistributable)

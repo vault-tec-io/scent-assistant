@@ -28,6 +28,7 @@
 - **Bluetooth (BLE)** - Fully local control, no cloud account needed, all features including fan control
 - **WiFi / Cloud** - Control via Aroma-Link cloud API, works from anywhere, no Bluetooth required
 - **Connect-on-Demand** - BLE connects only when sending commands, frees the adapter for other devices
+- **Optional Live Updates** - Aroma-Link BLE can stay connected for status refreshes and ticking countdowns
 - **Automatic Time Sync** - Device clock synced on every connection
 - **Schedule Management** - Set spray schedules via dashboard or automations
 - **Multiple Devices** - Add as many diffusers as you want
@@ -284,6 +285,36 @@ automation:
 
 Fan control is only available via Bluetooth. If you set up the device via Cloud/WiFi, the fan switch will not appear. This is a limitation of the Aroma-Link cloud API.
 
+### Aroma-Link state updates and live countdowns
+
+By default BLE uses connect-on-demand: state is read at setup and notifications
+are received while connected. Values are snapshots between connections. A normal
+idle disconnect does not make those cached entities unavailable.
+
+For live updates, open **Settings > Devices & Services > Scent Assistant >
+Configure** on an Aroma-Link BLE entry and enable **Enable live updates**. This
+keeps a Bluetooth connection open, reads fan and full status about every five
+seconds, and refreshes schedule/oil metadata about once a minute. The active
+countdown ticks every second between device reports and has the attribute
+`estimated_between_updates: true`. Only the observed phase is counted down;
+the integration does not predict another spray cycle after the counter expires.
+
+Live mode uses a Bluetooth adapter/proxy connection slot. Close the vendor app
+before enabling it; disable live mode before using the app again. On loss of
+connection or 30 seconds without a parsed reply, entities become unavailable.
+Failed refreshes wait at least 30 seconds before an automatic retry. Turn live
+mode off to return to connect-on-demand, particularly on an unreliable BLE link.
+Home Assistant's **Enable polling for updates** system option must also be on.
+
+Aroma-Link replies can span several Bluetooth notifications. The integration
+reassembles and validates those packets before updating entities, including the
+U5's full-status reply. Fan state is explicitly read using the same `52 03`
+request used by the vendor app, so it need not be toggled to obtain its state.
+Some firmware may not answer the full-status `52 0A` read repeatedly. In that
+case the countdown cannot stay synchronized: it becomes unavailable after the
+observed phase expires instead of fabricating further cycles. Live hardware
+validation is needed to establish each firmware's behavior.
+
 ### BLE range issues
 
 The integration uses connect-on-demand: it briefly connects, sends the command, then disconnects after 10 seconds. If your HA host is too far from the diffuser, consider:
@@ -309,6 +340,20 @@ This integration was built by reverse engineering the BLE protocols of both devi
 ## &#x1F91D; Contributing
 
 Contributions are welcome! If you have a diffuser that uses the Aroma-Link or Aroma Buddy app and can help test, please [open an issue](https://github.com/mr-sparks/scent-assistant/issues).
+
+### Running regression tests
+
+Use Python 3.14.2 or newer for the Home Assistant 2026.9 test environment:
+
+```sh
+python -m venv .venv
+.venv/bin/python -m pip install -r requirements-test.txt
+.venv/bin/python -m pytest -q
+```
+
+Tests replay sanitized U5 notification layouts through the protocol, device,
+and entity code, and cover live countdowns, disconnect/reconnect, command
+serialization, and options/setup cleanup. They do not connect to a real diffuser.
 
 ---
 

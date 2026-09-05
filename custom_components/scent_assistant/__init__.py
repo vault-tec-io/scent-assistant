@@ -14,6 +14,7 @@ import homeassistant.helpers.config_validation as cv
 
 from .const import (
     DOMAIN,
+    CONF_LIVE_UPDATES,
     CONF_BLE_ADDRESS,
     CONF_BLE_NAME,
     CONF_DEVICE_TYPE,
@@ -97,6 +98,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         cloud_device_id=cloud_device_id,
         sm_metadata=entry.data.get("sm_metadata"),
         gw_password=entry.data.get("gw_password"),
+        live_updates=bool(entry.options.get(CONF_LIVE_UPDATES, False)) and not entry.pref_disable_polling,
     )
 
     # Initial state query (BLE: connects briefly then disconnects; Cloud: polls API)
@@ -179,6 +181,15 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
         )
 
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    if (
+        connection_mode == "ble"
+        and device_type == DeviceType.AROMA_LINK
+        and entry.options.get(CONF_LIVE_UPDATES, False)
+        and not entry.pref_disable_polling
+    ):
+        entry.async_on_unload(async_track_time_interval(
+            hass, device.async_live_update, timedelta(seconds=1),
+        ))
     return True
 
 

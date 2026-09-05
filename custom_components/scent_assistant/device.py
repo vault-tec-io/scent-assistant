@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from datetime import datetime
 
 from bleak import BleakClient, BleakScanner, BleakError
@@ -68,6 +69,7 @@ class ScentDiffuserDevice:
         cloud_device_id: str | None = None,
         sm_metadata: dict | None = None,
         gw_password: str | None = None,
+        live_updates: bool = False,
     ) -> None:
         # HomeAssistant reference, used to fetch a cached BLEDevice via
         # the core bluetooth integration before opening a connection.
@@ -89,6 +91,14 @@ class ScentDiffuserDevice:
         self._ble_connected = False
         self._ble_notify_subscribed = False
         self._ble_lock = asyncio.Lock()
+        self._ble_operation_lock = asyncio.Lock()
+        self._shutting_down = False
+        self._last_notification_at: float | None = None
+        self._countdown_sample_at: float | None = None
+        self._countdown_phase: str | None = None
+        self._next_live_refresh = 0.0
+        self._next_live_metadata = 0.0
+        self._live_refresh_running = False
         self._ble_disconnect_task: asyncio.Task | None = None
         self._ble_has_synced_time = False
         # Monotonic timestamp of the last failed BLE connect/write —
@@ -108,6 +118,10 @@ class ScentDiffuserDevice:
             self._device_type = detect_device_type(ble_name) or DeviceType.AROMA_LINK
         else:
             self._device_type = DeviceType.AROMA_LINK
+
+        self._live_updates = bool(
+            live_updates and ble_address and self._device_type == DeviceType.AROMA_LINK
+        )
 
         # Protocol handler. GW-XOR needs the MAC for its keystream; GW
         # devices with PID 98 use the Tuya-DP hex parser.
@@ -197,6 +211,10 @@ class ScentDiffuserDevice:
         return self._state
 
     @property
+    def live_updates(self) -> bool:
+        return self._live_updates
+
+    @property
     def supports_fan(self) -> bool:
         return self._protocol.supports_fan()
 
@@ -227,7 +245,56 @@ class ScentDiffuserDevice:
 
     @property
     def available(self) -> bool:
+        if self._live_updates:
+            return bool(
+                self._ble_connected
+                and self._ble_client
+                and self._ble_client.is_connected
+                and self._last_notification_at is not None
+                and time.monotonic() - self._last_notification_at < 30
+            )
         return self.connection_mode != "offline"
+
+    def countdown_remaining(self, field: str) -> int | None:
+        """Estimate only the observed phase; never invent the next phase."""
+        value = getattr(self._state, field)
+        if not self._live_updates or value is None:
+            return value
+        if self._countdown_sample_at is None or self._countdown_phase != self._state.phase:
+            return None
+        elapsed = int(time.monotonic() - self._countdown_sample_at)
+        active_field = {"spraying": "work_remaining", "paused": "pause_remaining"}.get(self._state.phase)
+        if active_field is None:
+            return 0
+        active_value = getattr(self._state, active_field)
+        if active_value is None or elapsed > active_value + 5:
+            return None
+        return max(0, value - elapsed) if field == active_field else 0
+
+    async def async_live_update(self, now=None) -> None:
+        """Tick displayed countdowns each second; read device state every five."""
+        if self._shutting_down or not self._live_updates:
+            return
+        self._notify_state_changed()
+        clock = time.monotonic()
+        if self._live_refresh_running or clock < self._next_live_refresh:
+            return
+        self._live_refresh_running = True
+        try:
+            if self._ble_client is not None and not self.available:
+                async with self._ble_operation_lock:
+                    async with self._ble_lock:
+                        await self._teardown_ble_client(reason="live-stale")
+            metadata = clock >= self._next_live_metadata
+            await self.refresh_state(include_metadata=metadata)
+            self._next_live_refresh = time.monotonic() + (5 if self.available else 30)
+            if metadata and self.available:
+                self._next_live_metadata = time.monotonic() + 60
+        except Exception:
+            self._next_live_refresh = time.monotonic() + 30
+            _LOGGER.exception("Live BLE refresh failed for %s", self._ble_name)
+        finally:
+            self._live_refresh_running = False
 
     def register_state_callback(self, callback: callable) -> None:
         self._state_callbacks.append(callback)
@@ -245,7 +312,7 @@ class ScentDiffuserDevice:
 
     async def _ble_connect(self) -> bool:
         """Connect to BLE if not already connected. Auto-disconnects after idle."""
-        if not self._ble_address:
+        if not self._ble_address or self._shutting_down:
             return False
 
         # Cancel pending disconnect
@@ -296,9 +363,13 @@ class ScentDiffuserDevice:
                     BleakClient,
                     target,
                     self._ble_name or self._ble_address,
+                    disconnected_callback=self._on_ble_disconnect,
                     max_attempts=BLE_CONNECT_MAX_ATTEMPTS,
                 )
                 self._ble_connected = True
+                if isinstance(self._protocol, AromaLinkBleProtocol):
+                    self._protocol.reset_notifications()
+                    self._ble_has_synced_time = False
 
                 # Subscribe to notifications for responses. Without these
                 # the AK family can't sync state back to HA, so a silent
@@ -317,6 +388,10 @@ class ScentDiffuserDevice:
                         "BLE start_notify failed on %s (%s): %s",
                         self._ble_name, self._protocol.notify_char_uuid, err,
                     )
+                    if self._live_updates:
+                        await self._teardown_ble_client(reason="subscribe-failure")
+                        self._ble_last_failure_ts = loop.time()
+                        return False
 
                 # Scent Marketing AK family — PIN 8888 login must precede
                 # every other write, otherwise the device drops them
@@ -456,13 +531,29 @@ class ScentDiffuserDevice:
         """Schedule BLE disconnect after idle period."""
         if self._ble_disconnect_task and not self._ble_disconnect_task.done():
             self._ble_disconnect_task.cancel()
+        if self._live_updates or self._shutting_down:
+            return
         self._ble_disconnect_task = asyncio.ensure_future(self._delayed_disconnect())
 
     async def _delayed_disconnect(self) -> None:
         """Disconnect BLE after idle timeout."""
         await asyncio.sleep(BLE_IDLE_DISCONNECT_SECONDS)
-        async with self._ble_lock:
-            await self._teardown_ble_client(reason="idle")
+        async with self._ble_operation_lock:
+            async with self._ble_lock:
+                await self._teardown_ble_client(reason="idle")
+
+    def _on_ble_disconnect(self, client: BleakClient) -> None:
+        """Drop partial data and notify entities when the active link is lost."""
+        if client is not self._ble_client:
+            return
+        self._ble_connected = False
+        self._ble_notify_subscribed = False
+        self._countdown_sample_at = None
+        self._last_notification_at = None
+        self._ble_has_synced_time = False
+        if isinstance(self._protocol, AromaLinkBleProtocol):
+            self._protocol.reset_notifications()
+        self._notify_state_changed()
 
     async def _teardown_ble_client(self, *, reason: str = "error") -> None:
         """Cleanly release the BLE client.
@@ -499,6 +590,13 @@ class ScentDiffuserDevice:
                 )
         self._ble_client = None
         self._ble_connected = False
+        self._ble_has_synced_time = False
+        self._countdown_sample_at = None
+        self._last_notification_at = None
+        if isinstance(self._protocol, AromaLinkBleProtocol):
+            self._protocol.reset_notifications()
+        self._notify_state_changed()
+
 
     async def _ble_send(self, data: bytes) -> bool:
         """Send a command via BLE.
@@ -528,6 +626,11 @@ class ScentDiffuserDevice:
         return True
 
     async def _ble_execute(self, data: bytes) -> bool:
+        """Serialize commands with refreshes and idle teardown."""
+        async with self._ble_operation_lock:
+            return await self._ble_execute_locked(data)
+
+    async def _ble_execute_locked(self, data: bytes) -> bool:
         """Connect, send command, schedule disconnect."""
         if not await self._ble_connect():
             return False
@@ -553,6 +656,8 @@ class ScentDiffuserDevice:
         updates = self._protocol.parse_notification(raw)
         if not updates:
             return
+
+        self._last_notification_at = time.monotonic()
 
         changed = False
         if "power" in updates:
@@ -603,6 +708,9 @@ class ScentDiffuserDevice:
         if "pause_remaining" in updates:
             self._state.pause_remaining = updates["pause_remaining"]
             changed = True
+        if "work_remaining" in updates and "pause_remaining" in updates:
+            self._countdown_sample_at = time.monotonic()
+            self._countdown_phase = self._state.phase
         for _oil_field in (
             "oil_current_ml", "oil_max_ml",
             "oil_consumption_mlh",
@@ -1041,19 +1149,29 @@ class ScentDiffuserDevice:
 
         return False
 
-    async def refresh_state(self) -> None:
+    async def refresh_state(self, *, include_metadata: bool = True) -> None:
+        """Serialize device refreshes with commands and teardown."""
+        async with self._ble_operation_lock:
+            await self._refresh_state_locked(include_metadata=include_metadata)
+
+    async def _refresh_state_locked(self, *, include_metadata: bool = True) -> None:
         """Refresh device state."""
         if self._ble_address:
             if await self._ble_connect():
                 try:
-                    await self._ble_send(self._protocol.build_query())
-                    await asyncio.sleep(1.0)
+                    if include_metadata:
+                        await self._ble_send(self._protocol.build_query())
+                        await asyncio.sleep(1.0)
                     # Some protocols expose extra read-registers that the
                     # device only reports on demand (e.g. Aroma-Link's oil
                     # level). Query them too when the protocol offers one.
                     oil_query = getattr(self._protocol, "build_oil_query", None)
-                    if oil_query is not None:
+                    if oil_query is not None and include_metadata:
                         await self._ble_send(oil_query())
+                        await asyncio.sleep(0.3)
+                    fan_query = getattr(self._protocol, "build_fan_query", None)
+                    if fan_query is not None:
+                        await self._ble_send(fan_query())
                         await asyncio.sleep(0.3)
                     work_query = getattr(self._protocol, "build_all_work_query", None)
                     if work_query is not None:
@@ -1091,8 +1209,21 @@ class ScentDiffuserDevice:
         """Sync device clock to current local time (BLE only)."""
         if not self._ble_address:
             return False
-        self._ble_has_synced_time = False
-        return await self._ble_connect()
+        async with self._ble_operation_lock:
+            was_connected = bool(self._ble_client and self._ble_client.is_connected)
+            if not await self._ble_connect():
+                return False
+            if not was_connected:
+                return True  # The fresh connection just synced the clock.
+            # An existing live connection skips the connect handshake.
+            command = self._protocol.build_time_sync()
+            try:
+                return await self._ble_send(command) if command else False
+            except (BleakError, asyncio.TimeoutError, OSError):
+                self._ble_last_failure_ts = asyncio.get_event_loop().time()
+                async with self._ble_lock:
+                    await self._teardown_ble_client(reason="time-sync-failure")
+                return False
 
     # ------------------------------------------------------------------
     # Startup / Shutdown
@@ -1104,15 +1235,13 @@ class ScentDiffuserDevice:
 
     async def async_shutdown(self) -> None:
         """Clean up resources."""
+        self._shutting_down = True
         if self._momentary_task and not self._momentary_task.done():
             self._momentary_task.cancel()
         if self._ble_disconnect_task and not self._ble_disconnect_task.done():
             self._ble_disconnect_task.cancel()
-        if self._ble_client:
-            try:
-                if self._ble_client.is_connected:
-                    await self._ble_client.disconnect()
-            except Exception:
-                pass
+        async with self._ble_operation_lock:
+            async with self._ble_lock:
+                await self._teardown_ble_client(reason="shutdown")
         if self._cloud and hasattr(self._cloud, "close"):
             await self._cloud.close()

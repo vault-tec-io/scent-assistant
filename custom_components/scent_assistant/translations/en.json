@@ -41,5 +41,16 @@
     "abort": {
       "already_configured": "Device is already configured"
     }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Bluetooth state updates",
+        "description": "Live updates keep the diffuser connected, refresh state every five seconds, and estimate countdowns between device reports. This occupies a Bluetooth connection slot and prevents the vendor app from connecting at the same time. Disable it to use connect-on-demand.",
+        "data": {
+          "live_updates": "Enable live updates"
+        }
+      }
+    }
   }
 }

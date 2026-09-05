@@ -2,6 +2,7 @@
 from enum import StrEnum
 
 DOMAIN = "scent_assistant"
+CONF_LIVE_UPDATES = "live_updates"
 
 # ---------------------------------------------------------------------------
 # Device types

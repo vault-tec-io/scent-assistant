@@ -8,8 +8,10 @@ import voluptuous as vol
 from bleak import BleakScanner
 
 from homeassistant import config_entries
+from homeassistant.core import callback
 from .const import (
     DOMAIN,
+    CONF_LIVE_UPDATES,
     CONF_DEVICE_TYPE,
     CONF_BLE_ADDRESS,
     CONF_BLE_NAME,
@@ -32,6 +34,20 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     """Handle config flow for Scent Diffuser."""
 
     VERSION = 1
+
+    @staticmethod
+    @callback
+    def async_get_options_flow(config_entry):
+        """Expose an opt-in persistent BLE session for Aroma-Link devices."""
+        return ScentDiffuserOptionsFlow()
+
+    @classmethod
+    @callback
+    def async_supports_options_flow(cls, config_entry) -> bool:
+        return (
+            config_entry.data.get(CONF_CONNECTION_MODE, "ble") == "ble"
+            and config_entry.data.get(CONF_DEVICE_TYPE, "aroma_link") == "aroma_link"
+        )
 
     def __init__(self) -> None:
         self._discovered_devices: dict[str, dict] = {}
@@ -266,5 +282,22 @@ class ScentDiffuserConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="cloud_device",
             data_schema=vol.Schema({
                 vol.Required(CONF_CLOUD_DEVICE_ID): vol.In(device_options),
+            }),
+        )
+
+
+class ScentDiffuserOptionsFlow(config_entries.OptionsFlowWithReload):
+    """Configure whether Aroma-Link keeps a live Bluetooth connection."""
+
+    async def async_step_init(self, user_input=None):
+        if user_input is not None:
+            return self.async_create_entry(data={**self.config_entry.options, **user_input})
+        return self.async_show_form(
+            step_id="init",
+            data_schema=vol.Schema({
+                vol.Required(
+                    CONF_LIVE_UPDATES,
+                    default=self.config_entry.options.get(CONF_LIVE_UPDATES, False),
+                ): bool,
             }),
         )
