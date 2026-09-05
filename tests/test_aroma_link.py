@@ -66,3 +66,47 @@ def test_multiple_frames_and_recovery():
 
 def test_query_builder_matches_vendor_fan_read():
     assert AromaLinkBleProtocol().build_fan_query() == frame(b"\x52\x03")
+
+
+# Captured U5 table: seven days, five slots/day, slot 1 disabled, 50/60 s.
+SCHEDULE = bytes.fromhex("a5aaac7552150000173b100032003c0000000010000a00780000000010000a00780000000010000a00780000000010000a00780000173b100032003c0000000010000a00780000000010000a00780000000010000a00780000000010000a00780000173b100032003c0000000010000a00780000000010000a00780000000010000a00780000000010000a00780000173b100032003c0000000010000a00780000000010000a00780000000010000a00780000000010000a00780000173b100032003c0000000010000a00780000000010000a00780000000010000a00780000000010000a00780000173b100032003c0000000010000a00780000000010000a00780000000010000a00780000000010000a00780000173b100032003c0000000010000a00780000000010000a00780000000010000a00780000000010000a0078c5ccca")
+
+
+def test_real_schedule_reply_restores_disabled_program_durations():
+    protocol = AromaLinkBleProtocol()
+    result = {}
+    for i in range(0, len(SCHEDULE), 20):
+        result.update(protocol.parse_notification(SCHEDULE[i:i + 20]))
+    assert result["work_seconds"] == 50
+    assert result["pause_seconds"] == 60
+    assert result["schedule_enabled"] is False
+    assert result["end_minute"] == 59
+    # Countdown data must not replace configured work/pause values.
+    result = protocol.parse_notification(FULL_STATUS)
+    assert result["work_seconds"] == 50
+    assert result["pause_seconds"] == 60
+    assert result["pause_remaining"] == 40
+
+
+def test_schedule_tracks_device_weekday_and_ignores_empty_slots():
+    protocol = AromaLinkBleProtocol()
+    payload = bytearray(SCHEDULE[4:-3])
+    # Saturday's first slot differs from the rest of the week.
+    payload[2 + 5 * 45 + 5:2 + 5 * 45 + 9] = bytes.fromhex("001e005a")
+    protocol.parse_notification(frame(bytes(payload)))
+    result = protocol.parse_notification(FULL_STATUS)  # Saturday in the capture.
+    assert (result["work_seconds"], result["pause_seconds"]) == (30, 90)
+
+
+def test_schedule_cache_invalidated_after_write_or_disconnect():
+    protocol = AromaLinkBleProtocol()
+    protocol.parse_notification(SCHEDULE)
+    protocol.invalidate_schedule()
+    assert "work_seconds" not in protocol.parse_notification(FULL_STATUS)
+    protocol.parse_notification(SCHEDULE)
+    protocol.reset_notifications()
+    assert "work_seconds" not in protocol.parse_notification(FULL_STATUS)
+
+
+def test_truncated_schedule_is_not_accepted():
+    assert AromaLinkBleProtocol().parse_notification(frame(SCHEDULE[4:-4])) == {}

@@ -2,7 +2,7 @@
 
 This fork's `fix/u5-state-v1.2.1` branch is based on upstream **v1.2.1**,
 with the packet/state fixes and optional live mode. Its integration version is
-**1.2.1.post1**. It does not include the unrelated changes on upstream's
+**1.2.1.post2**. It does not include the unrelated changes on upstream's
 1.2.2 beta branch. This is a hardware-validation build, not an upstream release.
 
 ## Verified locally
@@ -15,6 +15,10 @@ with the packet/state fixes and optional live mode. Its integration version is
 - Regression tests run with Home Assistant 2026.9.0 and Python 3.14.3.
   They exercise real integration classes with a simulated Bluetooth transport.
 - Existing entity unique IDs and device/config-entry identifiers are retained.
+- Live U5 testing exposed a separate startup bug: configured durations were
+  never read back, so number entities could publish defaults that automations
+  would then save. The `52 15` table is now parsed, including disabled slots;
+  unavailable duration data is never replaced with fabricated defaults.
 
 ## Installation and rollback
 
@@ -26,7 +30,7 @@ with the packet/state fixes and optional live mode. Its integration version is
    delete or recreate the integration entry.
 4. Restart Home Assistant so Python loads the changed files. A config-entry
    reload alone does not reliably reload modified Python modules.
-5. Confirm diagnostics report version `1.2.1.post1`. Check power, fan, status,
+5. Confirm diagnostics report version `1.2.1.post2`. Check power, fan, status,
    and remaining-time entities before clicking any controls.
 6. In the integration's **Configure** options, enable **Enable live updates**.
    The entry reloads automatically. Leave **Enable polling for updates** on.

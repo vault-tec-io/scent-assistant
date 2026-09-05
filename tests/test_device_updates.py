@@ -11,6 +11,8 @@ from custom_components.scent_assistant.device import ScentDiffuserDevice
 from custom_components.scent_assistant.sensor import DiffuserWorkRemainSensor, DiffuserPauseRemainSensor
 from custom_components.scent_assistant.switch import DiffuserPowerSwitch, DiffuserFanSwitch
 from test_aroma_link import FULL_STATUS, frame
+from test_aroma_link import SCHEDULE
+from custom_components.scent_assistant.number import WorkDurationNumber, PauseDurationNumber
 
 
 @pytest.fixture
@@ -203,3 +205,13 @@ async def test_transport_connect_and_reconnect(monkeypatch):
     assert len(clients) == 2
     assert device._ble_send.await_count == 2
     await device.async_shutdown()
+
+
+def test_duration_entities_do_not_publish_fabricated_defaults_on_reload(device):
+    work, pause = WorkDurationNumber(device, None), PauseDurationNumber(device, None)
+    receive(device)
+    assert work.native_value is None and pause.native_value is None
+    assert not work.available and not pause.available
+    receive(device, SCHEDULE)
+    assert work.available and pause.available
+    assert (work.native_value, pause.native_value) == (50, 60)

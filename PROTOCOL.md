@@ -278,6 +278,14 @@ Offsets below are relative to the payload, starting at the command byte.
 | 17–20 | Start HH:MM and end HH:MM |
 | 30–31 | Battery percentage and has-battery flag |
 
+**Stored schedules (52 15):** The U5 replies with 315 data bytes after
+`52 15`: Monday through Sunday, five nine-byte slots per day. Each slot is
+`start_h start_m end_h end_m enabled work_hi work_lo pause_hi pause_lo`.
+The enabled byte is `10` (disabled) or `11` (enabled), as in a schedule write.
+There is no weekday mask in the reply. This 324-byte framed response restores
+configured durations even for a disabled program; countdown fields must not
+be used in its place. The current slot is selected using the device clock.
+
 These frames exceed the usual 20-byte notification payload. A U5 over an
 ESPHome proxy can deliver a single reply as 20 + 20 + remaining bytes. Keep
 the `A5 AA AC` through `C5 CC CA` frame buffered across notifications, verify

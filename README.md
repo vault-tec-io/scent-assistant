@@ -310,6 +310,10 @@ Aroma-Link replies can span several Bluetooth notifications. The integration
 reassembles and validates those packets before updating entities, including the
 U5's full-status reply. Fan state is explicitly read using the same `52 03`
 request used by the vendor app, so it need not be toggled to obtain its state.
+The `52 15` schedule table restores configured durations after a restart or
+reload, including disabled programs. Until a duration has been read, its
+entity is unavailable instead of publishing a made-up default that an
+automation could write back to the device.
 Some firmware may not answer the full-status `52 0A` read repeatedly. In that
 case the countdown cannot stay synchronized: it becomes unavailable after the
 observed phase expires instead of fabricating further cycles. Live hardware

@@ -553,6 +553,7 @@ class ScentDiffuserDevice:
         self._ble_has_synced_time = False
         if isinstance(self._protocol, AromaLinkBleProtocol):
             self._protocol.reset_notifications()
+            self._next_live_metadata = 0.0
         self._notify_state_changed()
 
     async def _teardown_ble_client(self, *, reason: str = "error") -> None:
@@ -595,6 +596,7 @@ class ScentDiffuserDevice:
         self._last_notification_at = None
         if isinstance(self._protocol, AromaLinkBleProtocol):
             self._protocol.reset_notifications()
+            self._next_live_metadata = 0.0
         self._notify_state_changed()
 
 
@@ -614,6 +616,9 @@ class ScentDiffuserDevice:
         """
         if not self._ble_client or not self._ble_client.is_connected:
             return False
+        if isinstance(self._protocol, AromaLinkBleProtocol) and data[4:6] == b"\x57\x16":
+            self._protocol.invalidate_schedule()
+            self._next_live_metadata = 0.0
         chunks = self._protocol.wire_chunks(data) if data else []
         if chunks:
             self._recent_commands.append(data.hex())

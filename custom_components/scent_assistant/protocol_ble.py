@@ -359,10 +359,18 @@ class AromaLinkBleProtocol(BleProtocol):
 
     def __init__(self) -> None:
         self._notification_buffer = bytearray()
+        self._schedule_payload: bytes | None = None
+        self._device_clock: tuple[int, int, int] | None = None
 
     def reset_notifications(self) -> None:
         """Discard incomplete replies when a BLE session ends."""
         self._notification_buffer.clear()
+        self._schedule_payload = None
+        self._device_clock = None
+
+    def invalidate_schedule(self) -> None:
+        """Do not reapply a cached table after writing new schedule values."""
+        self._schedule_payload = None
 
     @staticmethod
     def _xor_checksum(payload: bytes) -> int:
@@ -498,6 +506,15 @@ class AromaLinkBleProtocol(BleProtocol):
         cmd = payload[0]
         sub = payload[1]
 
+        if cmd == AL_CMD_QUERY and sub == AL_SUB_QUERY_SCHEDULES:
+            # U5: seven days, Monday first, five nine-byte slots per day.
+            # The response has no day mask; unlike countdowns these are
+            # the stored durations, even when the program is disabled.
+            if len(payload) == 2 + 7 * 5 * 9:
+                self._schedule_payload = payload[2:]
+                return self._schedule_state()
+            return result
+
         # "All work info" (0x0A) — arrives both as a reply to our 52 0A
         # query and as an unsolicited 53 0A push. Layout per the app's
         # handlerAllWorkStatus(); payload[2] is the app's offset i+6:
@@ -511,6 +528,8 @@ class AromaLinkBleProtocol(BleProtocol):
         if sub == AL_SUB_ALL_WORK_INFO and cmd in (AL_CMD_STATUS, AL_CMD_QUERY):
             if len(payload) < 22:
                 return result
+            if 1 <= payload[9] <= 7 and payload[6] < 24 and payload[7] < 60:
+                self._device_clock = (payload[9] - 1, payload[6], payload[7])
             if payload[11] in (0, 1):
                 result["power"] = bool(payload[11])
                 if not result["power"]:
@@ -533,6 +552,7 @@ class AromaLinkBleProtocol(BleProtocol):
             # flag is set (mains-only devices report 0 there).
             if len(payload) >= 32 and payload[31] == 1:
                 result["battery"] = max(0, min(100, payload[30]))
+            result.update(self._schedule_state())
             return result
 
         if cmd in (AL_CMD_STATUS, AL_CMD_QUERY) and sub == AL_SUB_FAN and len(payload) >= 3:
@@ -578,6 +598,39 @@ class AromaLinkBleProtocol(BleProtocol):
                 result["ack"] = sub
 
         return result
+
+    def _schedule_state(self) -> dict:
+        """Select today's configured slot using the diffuser's own clock."""
+        if self._schedule_payload is None:
+            return {}
+        now = datetime.now()
+        weekday, hour, minute = self._device_clock or (now.weekday(), now.hour, now.minute)
+        day = self._schedule_payload[weekday * 45:(weekday + 1) * 45]
+        slots = []
+        for offset in range(0, 45, 9):
+            sh, sm, eh, em, flag, wh, wl, ph, pl = day[offset:offset + 9]
+            if sh > 23 or eh > 23 or sm > 59 or em > 59 or flag not in (AL_SLOT_ENABLED, AL_SLOT_DISABLED):
+                return {}
+            start, end = sh * 60 + sm, eh * 60 + em
+            if start == end:
+                continue  # Empty filler slot.
+            work, pause = (wh << 8) | wl, (ph << 8) | pl
+            if not work or not pause:
+                continue
+            clock = hour * 60 + minute
+            in_window = start <= clock < end if start < end else clock >= start or clock < end
+            enabled = flag == AL_SLOT_ENABLED
+            slots.append((in_window, enabled, {
+                "work_seconds": work, "pause_seconds": pause,
+                "start_hour": sh, "start_minute": sm,
+                "end_hour": eh, "end_minute": em,
+                "schedule_enabled": enabled,
+            }))
+        if not slots:
+            return {}
+        # Prefer a running slot, then an in-window disabled program,
+        # then another enabled program. Preserve slot order on ties.
+        return max(slots, key=lambda slot: (slot[0], slot[1]))[2]
 
 
 # ---------------------------------------------------------------------------

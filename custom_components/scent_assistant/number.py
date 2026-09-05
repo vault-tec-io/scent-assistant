@@ -64,12 +64,14 @@ class WorkDurationNumber(NumberEntity):
         self.async_write_ha_state()
 
     @property
-    def native_value(self) -> float:
+    def native_value(self) -> float | None:
+        if self._device.device_type == DeviceType.AROMA_LINK:
+            return self._device.state.work_seconds or None
         return self._device.state.work_seconds or 10
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        return self._device.available and self.native_value is not None
 
     async def async_set_native_value(self, value: float) -> None:
         await self._device.set_work_duration(int(value))
@@ -101,12 +103,14 @@ class PauseDurationNumber(NumberEntity):
         self.async_write_ha_state()
 
     @property
-    def native_value(self) -> float:
+    def native_value(self) -> float | None:
+        if self._device.device_type == DeviceType.AROMA_LINK:
+            return self._device.state.pause_seconds or None
         return self._device.state.pause_seconds or 120
 
     @property
     def available(self) -> bool:
-        return self._device.available
+        return self._device.available and self.native_value is not None
 
     async def async_set_native_value(self, value: float) -> None:
         await self._device.set_pause_duration(int(value))
