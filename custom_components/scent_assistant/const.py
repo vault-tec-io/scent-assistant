@@ -419,6 +419,15 @@ CLOUD_SCHEDULE_REFRESH_EVERY = 10
 # (onOff, workStatus, work/pauseRemainTime, pumpCount) via /v1/app/device/work/{id}.
 CLOUD_POLL_INTERVAL_SECONDS = 60
 
+# BLE devices push state while connected, but connect-on-demand means
+# they're disconnected almost all the time — so refresh_state() ran
+# exactly once, at setup, and query-only telemetry (Aroma-Link oil and
+# remaining-time registers) went stale forever after (@gitorcus, #32).
+# Protocols opt in via `BleProtocol.periodic_refresh`; this is the
+# interval. Five minutes keeps the device's single BLE slot free for the
+# official app ~97% of the time while still tracking oil consumption.
+BLE_REFRESH_INTERVAL_SECONDS = 300
+
 # ---------------------------------------------------------------------------
 # Weekday bitmask (shared by both protocols)
 # ---------------------------------------------------------------------------

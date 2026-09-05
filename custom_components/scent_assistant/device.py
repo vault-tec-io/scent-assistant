@@ -130,6 +130,10 @@ class ScentDiffuserDevice:
         # State
         self._state = DiffuserState()
         self._state_callbacks: list[callable] = []
+        # Wall-clock time of the last BLE notification that changed
+        # state. Lets a user tell a fresh reading from a stale one
+        # without the entity flapping to unavailable (#32).
+        self._ble_last_update: datetime | None = None
 
         # Momentary diffusion ("Diffuse Now" button): power on, then
         # auto-off after this many seconds via a background task.
@@ -174,6 +178,16 @@ class ScentDiffuserDevice:
         write-without-response looks identical to a dead one otherwise.
         """
         return self._ble_write_response
+
+    @property
+    def ble_last_update(self) -> datetime | None:
+        """When the device last pushed a state-changing notification."""
+        return self._ble_last_update
+
+    @property
+    def supports_periodic_refresh(self) -> bool:
+        """BLE device whose protocol asked for a timed refresh."""
+        return bool(self._ble_address) and self._protocol.periodic_refresh
 
     @property
     def model_name(self) -> str:
@@ -709,6 +723,9 @@ class ScentDiffuserDevice:
             changed = True
 
         if changed:
+
+            self._ble_last_update = datetime.now().astimezone()
+
             self._notify_state_changed()
 
     def _recompute_oil_days(self) -> bool:
@@ -1107,6 +1124,22 @@ class ScentDiffuserDevice:
             return success
 
         return False
+
+    async def async_periodic_refresh(self) -> None:
+        """Timer-driven refresh for BLE devices (see BLE_REFRESH_INTERVAL_SECONDS).
+
+        Skipped while a momentary run is active: the run ends with a
+        power-off write, and a refresh landing in the middle of it would
+        connect for nothing and could reorder the writes.
+        """
+        if not self.supports_periodic_refresh:
+            return
+        if self._momentary_task is not None and not self._momentary_task.done():
+            return
+        try:
+            await self.refresh_state()
+        except Exception as err:
+            _LOGGER.debug("Periodic BLE refresh failed on %s: %s", self._ble_name, err)
 
     async def refresh_state(self) -> None:
         """Refresh device state."""

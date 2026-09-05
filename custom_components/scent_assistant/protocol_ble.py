@@ -199,6 +199,13 @@ class BleProtocol(ABC):
     write_char_uuid: str = CHAR_WRITE_UUID
     notify_char_uuid: str = CHAR_NOTIFY_UUID
 
+    # Whether HA should connect and re-run refresh_state() on a timer.
+    # Opt-in per family rather than global: a periodic connect is only
+    # worth it when the protocol has telemetry that is *query-only*, and
+    # it's actively harmful on firmwares that beep on every read query
+    # (one AK V3 variant does, #8).
+    periodic_refresh: bool = False
+
     @abstractmethod
     def build_power(self, on: bool) -> bytes:
         """Build power on/off command."""
@@ -357,6 +364,10 @@ class AromaLinkBleProtocol(BleProtocol):
     """Custom BLE protocol for Aroma-Link diffusers."""
 
     device_type = DeviceType.AROMA_LINK
+    # Oil level (52 1E) and the work-info block (52 0A) are answered only
+    # on request — the device never pushes them — so without a periodic
+    # refresh those sensors freeze at whatever the setup query returned.
+    periodic_refresh = True
 
     @staticmethod
     def _xor_checksum(payload: bytes) -> int:

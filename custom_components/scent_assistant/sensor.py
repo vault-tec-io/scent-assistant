@@ -164,6 +164,17 @@ class DiffuserOilSensor(SensorEntity):
         return self._device.state.oil_remaining
 
     @property
+    def extra_state_attributes(self) -> dict | None:
+        # Oil is query-only on some families, so "how old is this
+        # number" is a fair question. Answer it with a timestamp rather
+        # than by flipping the entity unavailable — an oil level doesn't
+        # move in minutes, and the last known value beats a gap.
+        last = self._device.ble_last_update
+        if last is None:
+            return None
+        return {"last_device_update": last.isoformat()}
+
+    @property
     def available(self) -> bool:
         return self._device.available and self._device.state.oil_remaining is not None
 
