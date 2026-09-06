@@ -121,6 +121,14 @@ SM_AK_RESP_FIRMWARE_V3 = 0x44         # response to CB (same opcode as our exist
 SM_AK_RESP_CONTROL = 0x4D             # control bitmask push/read (V2: 4D mask, V3: 4D 01 mask)
 SM_AK_RESP_GRADE_TABLE = 0x47         # response to C3: 47 + N×(work_u16 pause_u16), @Mins95 #8
 
+# Offset 1 of the V3 schedule frame (2A write / 4A read) is the diffuser
+# endpoint. Single-pump units always report 01; the A309 has three
+# independently programmable pumps and pushes a full slot set per
+# endpoint (@danieledwardgeorgehitchcock, #22). We write to the first one
+# only, so we read that one only — see the 4A branch of
+# `parse_notification`.
+SM_AK_V3_PRIMARY_ENDPOINT = 0x01
+
 # AK control-state bitmask layout (LSB = onOff). Mirrors writeTotalControl()
 # which builds a binary string "lock|lamp|1|demo|fan|onOff" → int(s, 2).
 SM_AK_CTRL_BIT_ONOFF = 0
@@ -199,6 +207,16 @@ BLE_NAME_PATTERNS = {
     # are detected via the AF30 service / manufacturer data instead, but
     # some expose "DiffuserAroMax" directly — match that as a fallback.
     DeviceType.AROMELY_ARO_MAX: ["DiffuserAroMax", "DiffuserAro"],
+    # "SA_" — Scent Marketing AK sold under other brands (AromaTech
+    # Ambience SA_AT600, #29). Normally these are identified by their
+    # manufacturer data, but some units advertise none at all: just the
+    # FFF0 service UUID and the name. @kartikkp's GATT dump shows the
+    # AK shape unambiguously — FFF6 carrying read + write-without-
+    # response + notify as one command/response channel — so route the
+    # name prefix to the AK family rather than letting it fall through
+    # to the Aroma-Link default, whose FFF1-notify / FFF2-write layout
+    # these devices do not have.
+    DeviceType.SCENT_MARKETING_AK: ["SA_"],
 }
 
 # Scent Marketing devices are identified primarily by manufacturer-specific
@@ -259,7 +277,12 @@ AL_SUB_SCHEDULE = 0x16
 AL_SUB_TIME_SYNC = 0x17
 AL_SUB_DEVICE_NAME = 0x01
 AL_SUB_DEVICE_INFO = 0x0D
-AL_SUB_QUERY_SCHEDULES = 0x15
+AL_SUB_QUERY_SCHEDULES = 0x15   # READ_WEEK_WORK_TIME — ~320-byte reply, unused (see build_query)
+AL_SUB_WORK_INFO = 0x09         # READ_WORK_INFO / LISTEN_WORKING_MSG: phase + *remaining* times
+AL_SUB_WORK_FREQUENCY = 0x06    # READ_WORK_FREQUENCY <weekday>: 5 slots × (work u16, pause u16, flags)
+# Reassembly cap for multi-notification frames. The longest reply the app
+# reads is READ_WEEK_WORK_TIME at ~320 bytes; anything past this is junk.
+AL_RX_BUFFER_MAX = 512
 # Read-register sub-command for the liquid/oil level. The device answers a
 # `52 1E` query with `52 1E <percent>` (e.g. 0x50 = 80%). Decoded from
 # @ndoty's Aromadd U5 Pro HCI snoop (#18), where the app read 0x1E and got
@@ -386,12 +409,30 @@ CLOUD_ENDPOINT_DEVICES = "/v1/app/device/listAll/{user_id}"
 CLOUD_ENDPOINT_SWITCH = "/v1/app/data/newSwitch"
 CLOUD_ENDPOINT_STATUS = "/v1/app/device/work/{device_id}"
 CLOUD_ENDPOINT_SCHEDULE = "/v1/app/data/workSetApp"
+# Schedule read-back. The app's GET_WEEK_WORK_TIME_URL — one call per
+# weekday, returning that day's work-time slots.
+CLOUD_ENDPOINT_WORK_TIME = "/v1/app/device/newWorkTime/{device_id}"
+
+# How many cloud polls to skip between schedule read-backs. The schedule
+# only changes when someone edits it, so re-reading it every poll would
+# double our request rate against the vendor's API for nothing; once
+# every 10 polls still picks up an app-side edit within minutes.
+CLOUD_SCHEDULE_REFRESH_EVERY = 10
 
 # Polling interval for cloud-mode devices. The integration previously had no
 # periodic refresh, so HA never observed autonomous spray cycles between
 # user-initiated commands. The Aroma-Link cloud exposes near-real-time state
 # (onOff, workStatus, work/pauseRemainTime, pumpCount) via /v1/app/device/work/{id}.
 CLOUD_POLL_INTERVAL_SECONDS = 60
+
+# BLE devices push state while connected, but connect-on-demand means
+# they're disconnected almost all the time — so refresh_state() ran
+# exactly once, at setup, and query-only telemetry (Aroma-Link oil and
+# remaining-time registers) went stale forever after (@gitorcus, #32).
+# Protocols opt in via `BleProtocol.periodic_refresh`; this is the
+# interval. Five minutes keeps the device's single BLE slot free for the
+# official app ~97% of the time while still tracking oil consumption.
+BLE_REFRESH_INTERVAL_SECONDS = 300
 
 # ---------------------------------------------------------------------------
 # Weekday bitmask (shared by both protocols)

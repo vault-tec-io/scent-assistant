@@ -61,10 +61,13 @@ def test_countdown_ticks_and_resynchronizes_without_changing_phase(device, monke
     assert device.countdown_remaining("pause_remaining") is None
 
 
-def test_phase_change_waits_for_fresh_counter(device):
+def test_work_info_push_updates_countdown_without_overwriting_configuration(device):
     receive(device)
+    device.state.work_seconds = 37
+    device.state.pause_seconds = 41
     receive(device, frame(bytes.fromhex("5309010032003c0000173b01")))
-    assert device.countdown_remaining("work_remaining") is None
+    assert device.countdown_remaining("work_remaining") == 50
+    assert (device.state.work_seconds, device.state.pause_seconds) == (37, 41)
 
 
 def test_disconnect_discards_fragment_and_marks_live_entities_unavailable(device):
@@ -102,7 +105,7 @@ async def test_refresh_reads_fan_and_full_status(device, monkeypatch):
 
     device._ble_send = send
     await device.refresh_state(include_metadata=False)
-    assert writes == [b"\x52\x03", b"\x52\x0a"]
+    assert writes == [b"\x52\x0a", b"\x52\x03"]
     assert device.state.fan is False
     assert device.state.power is True
     assert device.state.pause_remaining == 40

@@ -23,6 +23,7 @@ from .const import (
     SM_AK_CMD_V3_READ_OIL, SM_AK_CMD_V3_READ_OIL_INFO, SM_AK_CMD_V3_READ_FIRMWARE,
     SM_AK_CMD_V3_READ_CONTROL, SM_AK_CMD_V3_READ_MODEL,
     SM_AK_CMD_V3_READ_GRADE_TABLE, SM_AK_RESP_GRADE_TABLE,
+    SM_AK_V3_PRIMARY_ENDPOINT,
     SM_AK_RESP_SCHEDULE_V3, SM_AK_RESP_DEVICE_NAME_V3,
     SM_AK_RESP_LABEL_V3, SM_AK_RESP_MODEL_V3,
     SM_AK_CTRL_BIT_ONOFF, SM_AK_CTRL_BIT_FAN, SM_AK_CTRL_BIT_DEMO,
@@ -62,6 +63,7 @@ from .const import (
     AL_CMD_QUERY, AL_CMD_STATUS, AL_CMD_WRITE,
     AL_SUB_POWER, AL_SUB_FAN, AL_SUB_SCHEDULE, AL_SUB_TIME_SYNC,
     AL_SUB_QUERY_SCHEDULES, AL_SUB_OIL_LEVEL, AL_SUB_ALL_WORK_INFO,
+    AL_SUB_WORK_INFO, AL_SUB_WORK_FREQUENCY, AL_RX_BUFFER_MAX,
     AL_FAN_ON_VALUE, AL_FAN_OFF_VALUE,
     AL_SLOT_ENABLED, AL_SLOT_DISABLED,
     AL_PHASE_IDLE, AL_PHASE_SPRAYING, AL_PHASE_PAUSED,
@@ -197,6 +199,13 @@ class BleProtocol(ABC):
     service_uuid: str = SERVICE_UUID
     write_char_uuid: str = CHAR_WRITE_UUID
     notify_char_uuid: str = CHAR_NOTIFY_UUID
+
+    # Whether HA should connect and re-run refresh_state() on a timer.
+    # Opt-in per family rather than global: a periodic connect is only
+    # worth it when the protocol has telemetry that is *query-only*, and
+    # it's actively harmful on firmwares that beep on every read query
+    # (one AK V3 variant does, #8).
+    periodic_refresh: bool = False
 
     @abstractmethod
     def build_power(self, on: bool) -> bytes:
@@ -356,6 +365,21 @@ class AromaLinkBleProtocol(BleProtocol):
     """Custom BLE protocol for Aroma-Link diffusers."""
 
     device_type = DeviceType.AROMA_LINK
+    # Oil level (52 1E) and the work-info block (52 0A) are answered only
+    # on request — the device never pushes them — so without a periodic
+    # refresh those sensors freeze at whatever the setup query returned.
+    periodic_refresh = True
+
+    @staticmethod
+    def _phase_from_status(status: int, power: bool) -> str:
+        """Map the device's workStatus byte (0 off/idle, 1 spraying, 2 paused)."""
+        if not power:
+            return "off"
+        if status == AL_PHASE_SPRAYING:
+            return "spraying"
+        if status == AL_PHASE_PAUSED:
+            return "paused"
+        return "idle"
 
     def __init__(self) -> None:
         self._notification_buffer = bytearray()
@@ -394,6 +418,28 @@ class AromaLinkBleProtocol(BleProtocol):
         ]))
 
     def build_query(self) -> bytes:
+        """Status query: the "all work info" register (52 0A).
+
+        Previously this sent READ_WEEK_WORK_TIME (52 15), whose ~320-byte
+        reply arrives as 16+ notifications that were never reassembled —
+        so every refresh made the device stream a response we could not
+        read. 52 0A is what the official app polls every 20 s: on/off,
+        phase, remaining times, window and battery in one frame.
+        """
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_ALL_WORK_INFO]))
+
+    def build_work_frequency_query(self, weekday: int) -> bytes:
+        """READ_WORK_FREQUENCY for one weekday (0 = Sun … 6 = Sat).
+
+        Reply: `52 06 <weekday>` then five slots of
+        `<work u16> <pause u16> <level<<4 | enabled>` — the configured
+        durations, as opposed to the countdowns in 53 09 / 52 0A.
+        Mirrors the app's getWorkFrePack().
+        """
+        return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_WORK_FREQUENCY, weekday & 0xFF]))
+
+    def build_schedule_query(self) -> bytes:
+        """Read the weekly table as a fallback verified on the U5."""
         return self._build_packet(bytes([AL_CMD_QUERY, AL_SUB_QUERY_SCHEDULES]))
 
     def build_fan_query(self) -> bytes:
@@ -479,22 +525,25 @@ class AromaLinkBleProtocol(BleProtocol):
                 break
             if start:
                 del buffer[:start]
+            # A trailer may occur inside a payload. Like upstream, only
+            # accept a candidate after validating its XOR checksum.
             end = buffer.find(AL_TRAILER, 4)
+            while end >= 0:
+                payload = bytes(buffer[4:end])
+                if self._xor_checksum(payload) == buffer[3]:
+                    del buffer[:end + len(AL_TRAILER)]
+                    result.update(self._parse_payload(payload))
+                    break
+                end = buffer.find(AL_TRAILER, end + 1)
+            if end >= 0:
+                continue
             next_start = buffer.find(AL_HEADER, 3)
-            if next_start >= 0 and (end < 0 or next_start < end):
+            if next_start >= 0:
                 del buffer[:next_start]
                 continue
-            if end < 0:
-                # Largest known replies are well below 512 bytes. Bound a
-                # damaged stream rather than retaining it for the session.
-                if len(buffer) > 512:
-                    buffer.clear()
-                break
-            payload = bytes(buffer[4:end])
-            checksum = buffer[3]
-            del buffer[:end + len(AL_TRAILER)]
-            if self._xor_checksum(payload) == checksum:
-                result.update(self._parse_payload(payload))
+            if len(buffer) > AL_RX_BUFFER_MAX:
+                buffer.clear()
+            break
         return result
 
     def _parse_payload(self, payload: bytes) -> dict:
@@ -569,22 +618,47 @@ class AromaLinkBleProtocol(BleProtocol):
             elif sub == AL_SUB_FAN and len(payload) >= 3:
                 result["fan"] = payload[2] == AL_FAN_ON_VALUE
 
-            elif sub == 0x09 and len(payload) >= 11:
-                # Spray cycle status: phase, work, pause, start, end, enabled
-                phase_byte = payload[2]
-                if phase_byte == AL_PHASE_IDLE:
-                    result["phase"] = "idle"
-                elif phase_byte == AL_PHASE_SPRAYING:
-                    result["phase"] = "spraying"
-                elif phase_byte == AL_PHASE_PAUSED:
-                    result["phase"] = "paused"
-
-                result["work_seconds"] = (payload[3] << 8) | payload[4]
-                result["pause_seconds"] = (payload[5] << 8) | payload[6]
+            elif sub == AL_SUB_WORK_INFO and len(payload) >= 11:
+                # Work-info push. Per the app's parseWorkInfo():
+                #   [2] workStatus  [3..4] workRemainTime  [5..6] pauseRemainTime
+                #   [7..8] start HH MM  [9..10] end HH MM  [11] airPump
+                # Bytes 3..6 are the live *countdowns*, not the configured
+                # durations — v1.0.0 through v1.2.2 stored them in
+                # work_seconds/pause_seconds, which happened to look right
+                # because the device pushes this frame right after a
+                # schedule write, when remaining == configured. The
+                # configured values come from 52 06 instead.
+                result["phase"] = self._phase_from_status(payload[2], True)
+                result["work_remaining"] = (payload[3] << 8) | payload[4]
+                result["pause_remaining"] = (payload[5] << 8) | payload[6]
                 result["start_hour"] = payload[7]
                 result["start_minute"] = payload[8]
                 result["end_hour"] = payload[9]
                 result["end_minute"] = payload[10]
+
+        elif cmd == AL_CMD_QUERY and sub == AL_SUB_WORK_FREQUENCY and len(payload) >= 8:
+            # `52 06 <weekday>` + 5 × `<work u16> <pause u16> <level<<4|enabled>`
+            # (app: handlerWorkFre). Prefer the first enabled slot; fall
+            # back to the first slot so a disabled schedule still shows
+            # the durations the user last set — same policy as the cloud
+            # path.
+            slots = []
+            for k in range(5):
+                base = 3 + 5 * k
+                if len(payload) < base + 5:
+                    break
+                work = (payload[base] << 8) | payload[base + 1]
+                pause = (payload[base + 2] << 8) | payload[base + 3]
+                enabled = bool(payload[base + 4] & 0x0F)
+                slots.append((enabled, work, pause))
+            chosen = next((sl for sl in slots if sl[0]), slots[0] if slots else None)
+            if chosen is not None:
+                enabled, work, pause = chosen
+                result["schedule_enabled"] = enabled
+                if work > 0:
+                    result["work_seconds"] = work
+                if pause > 0:
+                    result["pause_seconds"] = pause
 
         elif cmd == AL_CMD_QUERY and sub == AL_SUB_OIL_LEVEL and len(payload) >= 3:
             # Read-register reply for the liquid level: `52 1E <percent>`.
@@ -1438,6 +1512,23 @@ class ScentMarketingAkProtocol(BleProtocol):
                 result["schedule_enabled"] = True
 
         elif op == SM_AK_RESP_SCHEDULE_V3 and len(data) >= 14:
+            # Offset 1 is the diffuser endpoint. Single-pump units report
+            # a constant 01 here, but multi-pump models like the A309
+            # carry three independently programmable diffusers and push
+            # one set of slots per endpoint — 15 frames in total
+            # (@danieledwardgeorgehitchcock, #22). Absorbing all of them
+            # into one state means endpoint 2 and 3 overwrite endpoint
+            # 1's schedule, so HA displays the last endpoint that
+            # happened to push while our writes (2A 01 …) still go to the
+            # first one: the user edits something other than what they
+            # see.
+            #
+            # Until each endpoint gets its own entities, keep to the one
+            # we actually write to. Skip only endpoints above the first,
+            # so a variant that numbers its sole pump 00 still works.
+            if data[1] > SM_AK_V3_PRIMARY_ENDPOINT:
+                return result
+
             # V3 schedule slot read-back, response to C5 / CA01XX:
             #     4A 01 02 FF FE SS EE HH MM HH MM DD 00 LL 00 0F 01 2C
             # where FF (offset 3) carries the fan state and FE (offset

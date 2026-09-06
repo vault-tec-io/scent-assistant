@@ -288,7 +288,8 @@ Fan control is only available via Bluetooth. If you set up the device via Cloud/
 ### Aroma-Link state updates and live countdowns
 
 By default BLE uses connect-on-demand: state is read at setup and notifications
-are received while connected. Values are snapshots between connections. A normal
+are received while connected. Aroma-Link refreshes every five minutes when
+polling is enabled. Values are snapshots between connections. A normal
 idle disconnect does not make those cached entities unavailable.
 
 For live updates, open **Settings > Devices & Services > Scent Assistant >

@@ -164,6 +164,17 @@ class DiffuserOilSensor(SensorEntity):
         return self._device.state.oil_remaining
 
     @property
+    def extra_state_attributes(self) -> dict | None:
+        # Oil is query-only on some families, so "how old is this
+        # number" is a fair question. Answer it with a timestamp rather
+        # than by flipping the entity unavailable — an oil level doesn't
+        # move in minutes, and the last known value beats a gap.
+        last = self._device.ble_last_update
+        if last is None:
+            return None
+        return {"last_device_update": last.isoformat()}
+
+    @property
     def available(self) -> bool:
         return self._device.available and self._device.state.oil_remaining is not None
 
@@ -254,9 +265,9 @@ class DiffuserOilDaysSensor(_OilFieldSensor):
 class DiffuserWorkRemainSensor(SensorEntity):
     """Remaining seconds of the current spray phase (Aroma-Link 52 0A).
 
-    While the device is idle the firmware reports the configured work
-    duration instead of a live countdown. The value only refreshes when
-    HA polls the device, so treat it as a snapshot, not a ticking timer.
+    Normal mode exposes the last reported snapshot. Optional live mode
+    estimates the active countdown between device reports and shows zero
+    when idle; it never predicts the next phase.
     """
 
     _attr_has_entity_name = True

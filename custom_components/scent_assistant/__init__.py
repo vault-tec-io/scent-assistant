@@ -22,6 +22,7 @@ from .const import (
     CONF_CLOUD_PASSWORD,
     CONF_CLOUD_DEVICE_ID,
     CONF_CONNECTION_MODE,
+    BLE_REFRESH_INTERVAL_SECONDS,
     CLOUD_POLL_INTERVAL_SECONDS,
     WEEKDAY_MON, WEEKDAY_TUE, WEEKDAY_WED, WEEKDAY_THU,
     WEEKDAY_FRI, WEEKDAY_SAT, WEEKDAY_SUN,
@@ -126,6 +127,20 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
             timedelta(seconds=CLOUD_POLL_INTERVAL_SECONDS),
         )
 
+    # BLE devices are disconnected almost all the time (connect-on-demand),
+    # so their query-only registers only ever got read at setup. Protocols
+    # that carry such telemetry opt in via `periodic_refresh`; the device
+    # manager decides whether a given tick is safe to act on.
+    if device.supports_periodic_refresh and not device.live_updates and not entry.pref_disable_polling:
+        async def _periodic_ble_refresh(now=None) -> None:
+            await device.async_periodic_refresh()
+
+        device._unsub_ble_refresh = async_track_time_interval(
+            hass,
+            _periodic_ble_refresh,
+            timedelta(seconds=BLE_REFRESH_INTERVAL_SECONDS),
+        )
+
     # Register services (once for all entries)
     if not hass.services.has_service(DOMAIN, SERVICE_SET_SCHEDULE):
         async def handle_set_schedule(call: ServiceCall) -> None:
@@ -199,9 +214,10 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     if unload_ok:
         device: ScentDiffuserDevice = hass.data[DOMAIN].pop(entry.entry_id)
-        unsub = getattr(device, "_unsub_cloud_poll", None)
-        if unsub is not None:
-            unsub()
+        for attr in ("_unsub_cloud_poll", "_unsub_ble_refresh"):
+            unsub = getattr(device, attr, None)
+            if unsub is not None:
+                unsub()
         await device.async_shutdown()
 
     return unload_ok

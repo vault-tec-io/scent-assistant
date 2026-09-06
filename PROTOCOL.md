@@ -245,9 +245,11 @@ C5 CC CA
 
 **Spray cycle status (53 09):**
 ```
-53 09 [phase] [work_hi work_lo] [pause_hi pause_lo] [start_h start_m] [end_h end_m] [enabled]
+53 09 [phase] [work_remaining_hi work_remaining_lo] [pause_remaining_hi pause_remaining_lo] [start_h start_m] [end_h end_m] [air_pump]
 ```
-Phase: 0x00=idle, 0x01=spraying, 0x02=paused
+Phase: 0x00=idle, 0x01=spraying, 0x02=paused. These durations are live
+remaining times, not the configured work/pause values. Upstream v1.2.3-beta.1
+corrects this distinction and reads configuration through `52 06 <weekday>`.
 
 **Power state (53 08):**
 ```

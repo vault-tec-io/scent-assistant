@@ -19,6 +19,7 @@ from homeassistant.core import HomeAssistant
 
 from .const import (
     DeviceType,
+    CLOUD_SCHEDULE_REFRESH_EVERY,
     DEFAULT_CONNECT_TIMEOUT,
     DEFAULT_WORK_DURATION,
     DEFAULT_PAUSE_DURATION,
@@ -90,6 +91,10 @@ class ScentDiffuserDevice:
         self._ble_client: BleakClient | None = None
         self._ble_connected = False
         self._ble_notify_subscribed = False
+        # Whether the write characteristic wants a GATT response —
+        # resolved from the device's own GATT table on first write and
+        # cached for the lifetime of the connection.
+        self._ble_write_response: bool | None = None
         self._ble_lock = asyncio.Lock()
         self._ble_operation_lock = asyncio.Lock()
         self._shutting_down = False
@@ -132,10 +137,17 @@ class ScentDiffuserDevice:
         # Cloud
         self._cloud: AromaLinkCloudClient | None = cloud_client
         self._cloud_device_id = cloud_device_id
+        # Counts cloud refreshes so the schedule read-back can run on the
+        # first one and then only every CLOUD_SCHEDULE_REFRESH_EVERY.
+        self._cloud_schedule_poll_count = 0
 
         # State
         self._state = DiffuserState()
         self._state_callbacks: list[callable] = []
+        # Wall-clock time of the last BLE notification that changed
+        # state. Lets a user tell a fresh reading from a stale one
+        # without the entity flapping to unavailable (#32).
+        self._ble_last_update: datetime | None = None
 
         # Momentary diffusion ("Diffuse Now" button): power on, then
         # auto-off after this many seconds via a background task.
@@ -170,6 +182,26 @@ class ScentDiffuserDevice:
     @property
     def recent_commands(self) -> list[str]:
         return list(self._recent_commands)
+
+    @property
+    def ble_write_response(self) -> bool | None:
+        """Write mode resolved from the device's GATT table.
+
+        `None` until the first BLE write of a connection. Surfaced in
+        diagnostics because a unit that only accepts
+        write-without-response looks identical to a dead one otherwise.
+        """
+        return self._ble_write_response
+
+    @property
+    def ble_last_update(self) -> datetime | None:
+        """When the device last pushed a state-changing notification."""
+        return self._ble_last_update
+
+    @property
+    def supports_periodic_refresh(self) -> bool:
+        """BLE device whose protocol asked for a timed refresh."""
+        return bool(self._ble_address) and self._protocol.periodic_refresh
 
     @property
     def model_name(self) -> str:
@@ -604,6 +636,46 @@ class ScentDiffuserDevice:
             self._next_live_metadata = 0.0
         self._notify_state_changed()
 
+        self._ble_write_response = None
+
+    def _write_needs_response(self) -> bool:
+        """Decide whether writes to this device need a GATT response.
+
+        Most supported units declare `WRITE` on their write
+        characteristic and answer a with-response write happily. Some
+        rebadged ones don't: the YOOAI-OEM Aromely variant sold as
+        "SPACE-BLE" declares *only* `write-without-response` on FFE2, so
+        every with-response write is rejected with GATT error 3 and the
+        handshake never completes.
+
+        So honour whatever the characteristic actually declares, and
+        fall back to with-response whenever the GATT table can't be
+        resolved — that is the behaviour every currently-supported
+        device was verified against.
+        """
+        if self._ble_write_response is not None:
+            return self._ble_write_response
+        with_response = True
+        try:
+            char = self._ble_client.services.get_characteristic(
+                self._protocol.write_char_uuid
+            )
+            if char is not None:
+                props = [str(p).lower() for p in (char.properties or [])]
+                if props and "write" not in props:
+                    with_response = False
+                    _LOGGER.debug(
+                        "BLE write char %s on %s is write-without-response "
+                        "only (props=%s) — writing without response",
+                        self._protocol.write_char_uuid, self._ble_name, props,
+                    )
+        except Exception as err:
+            _LOGGER.debug(
+                "Could not resolve write properties for %s on %s: %s",
+                self._protocol.write_char_uuid, self._ble_name, err,
+            )
+        self._ble_write_response = with_response
+        return with_response
 
     async def _ble_send(self, data: bytes) -> bool:
         """Send a command via BLE.
@@ -629,9 +701,10 @@ class ScentDiffuserDevice:
             self._recent_commands.append(data.hex())
             if len(self._recent_commands) > 10:
                 del self._recent_commands[0]
+        with_response = self._write_needs_response()
         for chunk in chunks:
             await self._ble_client.write_gatt_char(
-                self._protocol.write_char_uuid, chunk, response=True
+                self._protocol.write_char_uuid, chunk, response=with_response
             )
         return True
 
@@ -768,6 +841,9 @@ class ScentDiffuserDevice:
             changed = True
 
         if changed:
+
+            self._ble_last_update = datetime.now().astimezone()
+
             self._notify_state_changed()
 
     def _recompute_oil_days(self) -> bool:
@@ -850,20 +926,28 @@ class ScentDiffuserDevice:
         return False
 
     async def momentary_diffuse(self) -> bool:
-        """Run the diffuser for `momentary_seconds`, then switch it off.
+        """Run the diffuser, optionally switching it off after a delay.
 
         There is no native one-shot command in the Aroma-Link protocol
         (verified against the decompiled official app), so this is
-        power-on followed by a delayed power-off task. Pressing again
-        while a run is active restarts the countdown.
+        power-on followed by an optional delayed power-off task. Pressing
+        again while a run is active restarts the countdown.
+
+        A Momentary Duration of 0 disables the delayed power-off, leaving
+        the diffuser powered on so its onboard schedule can continue.
         """
         if self._momentary_task and not self._momentary_task.done():
             self._momentary_task.cancel()
+        self._momentary_task = None
+
         if not await self.set_power(True):
             return False
-        self._momentary_task = asyncio.ensure_future(
-            self._momentary_off_later(self.momentary_seconds)
-        )
+
+        if self.momentary_seconds > 0:
+            self._momentary_task = asyncio.ensure_future(
+                self._momentary_off_later(self.momentary_seconds)
+            )
+
         return True
 
     async def _momentary_off_later(self, delay: int) -> None:
@@ -1159,6 +1243,22 @@ class ScentDiffuserDevice:
 
         return False
 
+    async def async_periodic_refresh(self) -> None:
+        """Timer-driven refresh for BLE devices (see BLE_REFRESH_INTERVAL_SECONDS).
+
+        Skipped while a momentary run is active: the run ends with a
+        power-off write, and a refresh landing in the middle of it would
+        connect for nothing and could reorder the writes.
+        """
+        if not self.supports_periodic_refresh:
+            return
+        if self._momentary_task is not None and not self._momentary_task.done():
+            return
+        try:
+            await self.refresh_state()
+        except Exception as err:
+            _LOGGER.debug("Periodic BLE refresh failed on %s: %s", self._ble_name, err)
+
     async def refresh_state(self, *, include_metadata: bool = True) -> None:
         """Serialize device refreshes with commands and teardown."""
         async with self._ble_operation_lock:
@@ -1169,24 +1269,23 @@ class ScentDiffuserDevice:
         if self._ble_address:
             if await self._ble_connect():
                 try:
-                    if include_metadata:
-                        await self._ble_send(self._protocol.build_query())
-                        await asyncio.sleep(1.0)
-                    # Some protocols expose extra read-registers that the
-                    # device only reports on demand (e.g. Aroma-Link's oil
-                    # level). Query them too when the protocol offers one.
-                    oil_query = getattr(self._protocol, "build_oil_query", None)
-                    if oil_query is not None and include_metadata:
-                        await self._ble_send(oil_query())
-                        await asyncio.sleep(0.3)
+                    await self._ble_send(self._protocol.build_query())
+                    await asyncio.sleep(1.0)
                     fan_query = getattr(self._protocol, "build_fan_query", None)
                     if fan_query is not None:
                         await self._ble_send(fan_query())
                         await asyncio.sleep(0.3)
-                    work_query = getattr(self._protocol, "build_all_work_query", None)
-                    if work_query is not None:
-                        await self._ble_send(work_query())
-                        await asyncio.sleep(0.3)
+                    if include_metadata:
+                        for name in ("build_oil_query", "build_work_frequency_query", "build_schedule_query"):
+                            query = getattr(self._protocol, name, None)
+                            if query is None:
+                                continue
+                            if name == "build_work_frequency_query":
+                                packet = query((datetime.now().weekday() + 1) % 7)
+                            else:
+                                packet = query()
+                            await self._ble_send(packet)
+                            await asyncio.sleep(0.3)
                 except (BleakError, asyncio.TimeoutError, OSError) as err:
                     _LOGGER.debug("BLE refresh query failed on %s: %s", self._ble_name, err)
                     self._ble_last_failure_ts = asyncio.get_event_loop().time()
@@ -1195,6 +1294,7 @@ class ScentDiffuserDevice:
             return
 
         if self.supports_cloud and self._cloud:
+            got_schedule_from_status = False
             status = await self._cloud.get_status(self._cloud_device_id)
             if status:
                 if "power" in status and status["power"] is not None:
@@ -1213,7 +1313,69 @@ class ScentDiffuserDevice:
                     self._state.oil_remaining = status["oil_remaining"]
                 if status.get("battery") is not None:
                     self._state.battery = status["battery"]
+                # The status payload usually carries the configured
+                # window and durations too — cheaper and more direct
+                # than the separate schedule endpoint (#24).
+                for field in (
+                    "start_hour", "start_minute", "end_hour", "end_minute",
+                    "work_seconds", "pause_seconds",
+                ):
+                    if field in status:
+                        setattr(self._state, field, status[field])
+                # The fallback exists to supply the window, so only skip
+                # it once we actually have one — a payload carrying just
+                # the durations shouldn't suppress it.
+                got_schedule_from_status = (
+                    "start_hour" in status and "end_hour" in status
+                )
                 self._notify_state_changed()
+
+            # Only fall back to the dedicated schedule endpoint when the
+            # status payload didn't carry the window itself.
+            if not got_schedule_from_status:
+                await self._refresh_cloud_schedule()
+
+    async def _refresh_cloud_schedule(self) -> None:
+        """Read the schedule the device holds back from the cloud.
+
+        `get_status` reports what the device is doing right now but not
+        what it is scheduled to do, so without this the Start/End Time
+        and duration entities have nothing to restore from and show
+        their defaults after a restart — claiming 00:00–23:59 while the
+        device happily runs 08:00–21:30.
+
+        The schedule only changes when someone edits it, so this runs on
+        the first refresh and then every `CLOUD_SCHEDULE_REFRESH_EVERY`
+        polls rather than on every one.
+        """
+        if not (self.supports_cloud and self._cloud):
+            return
+        due = (
+            self._cloud_schedule_poll_count % CLOUD_SCHEDULE_REFRESH_EVERY == 0
+        )
+        self._cloud_schedule_poll_count += 1
+        if not due:
+            return
+
+        # 1=Mon … 7=Sun, matching set_schedule's numbering. We write the
+        # same schedule to every weekday, so reading today's is enough.
+        weekday = datetime.now().weekday() + 1
+        schedule = await self._cloud.get_schedule(self._cloud_device_id, weekday)
+        if not schedule:
+            return
+
+        for field in (
+            "start_hour",
+            "start_minute",
+            "end_hour",
+            "end_minute",
+            "work_seconds",
+            "pause_seconds",
+            "schedule_enabled",
+        ):
+            if field in schedule:
+                setattr(self._state, field, schedule[field])
+        self._notify_state_changed()
 
     async def sync_time(self) -> bool:
         """Sync device clock to current local time (BLE only)."""

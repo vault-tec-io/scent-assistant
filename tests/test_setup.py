@@ -11,7 +11,7 @@ from custom_components.scent_assistant.const import DOMAIN
 
 @pytest.mark.parametrize("live,disabled,mode,kind,expected", [
     (True, False, "ble", "aroma_link", True),
-    (False, False, "ble", "aroma_link", False),
+    (False, False, "ble", "aroma_link", True),
     (True, True, "ble", "aroma_link", False),
     (True, False, "cloud", "aroma_link", False),
     (True, False, "ble", "scentiment", False),
@@ -21,6 +21,8 @@ async def test_setup_registers_live_timer_only_when_requested(monkeypatch, live,
     device.async_setup = AsyncMock()
     device.async_shutdown = AsyncMock()
     device.async_live_update = AsyncMock()
+    device.live_updates = live and not disabled and mode == "ble" and kind == "aroma_link"
+    device.supports_periodic_refresh = mode == "ble" and kind == "aroma_link"
     factory = Mock(return_value=device)
     monkeypatch.setattr(integration, "ScentDiffuserDevice", factory)
     timer = Mock(return_value=Mock())
@@ -36,8 +38,10 @@ async def test_setup_registers_live_timer_only_when_requested(monkeypatch, live,
     assert await integration.async_setup_entry(hass, entry)
     assert timer.called is expected
     if expected:
-        assert timer.call_args.args[2].total_seconds() == 1
-        entry.async_on_unload.assert_called_once_with(timer.return_value)
+        assert timer.call_count == 1
+        assert timer.call_args.args[2].total_seconds() == (1 if live else 300)
+        if live:
+            entry.async_on_unload.assert_called_once_with(timer.return_value)
     assert await integration.async_unload_entry(hass, entry)
     device.async_shutdown.assert_awaited_once()
     assert "test" not in hass.data[DOMAIN]

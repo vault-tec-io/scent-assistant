@@ -1,9 +1,15 @@
 # Aromadd U5 state-update test build
 
-This fork's `fix/u5-state-v1.2.1` branch is based on upstream **v1.2.1**,
-with the packet/state fixes and optional live mode. Its integration version is
-**1.2.1.post2**. It does not include the unrelated changes on upstream's
-1.2.2 beta branch. This is a hardware-validation build, not an upstream release.
+This fork's `fix/u5-live-updates` branch includes upstream **v1.2.3-beta.1**
+(commit `ac928a7`), including all v1.2.2 changes. Its integration version is
+**1.2.3-beta.1.post1**. It adds live updates, fan readback, a U5 weekly-table
+fallback, and Bluetooth startup recovery. This is an experimental build.
+
+The upstream beta already fixes full-status power/phase, fragmented replies,
+and the distinction between remaining time and configured durations. Those
+fixes are retained. Its normal five-minute refresh remains available with live
+mode off; live mode uses a separate one-second display timer and frequent reads.
+See [UPSTREAM-REVIEW.md](UPSTREAM-REVIEW.md) for the release comparison.
 
 ## Verified locally
 
@@ -30,7 +36,7 @@ with the packet/state fixes and optional live mode. Its integration version is
    delete or recreate the integration entry.
 4. Restart Home Assistant so Python loads the changed files. A config-entry
    reload alone does not reliably reload modified Python modules.
-5. Confirm diagnostics report version `1.2.1.post2`. Check power, fan, status,
+5. Confirm diagnostics report version `1.2.3-beta.1.post1`. Check power, fan, status,
    and remaining-time entities before clicking any controls.
 6. In the integration's **Configure** options, enable **Enable live updates**.
    The entry reloads automatically. Leave **Enable polling for updates** on.
@@ -39,7 +45,7 @@ with the packet/state fixes and optional live mode. Its integration version is
    unnecessary; leave it as-is until deciding to remove that workaround.
 
 To roll back, disable live mode, restore the saved integration directory (or
-redownload upstream v1.2.1 in HACS), and restart Home Assistant. Keep the
+redownload the previously installed upstream release in HACS), and restart Home Assistant. Keep the
 integration entry so entity IDs and automations remain intact. HACS may replace
 this test build on a later upstream download/update.
 

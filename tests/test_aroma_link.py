@@ -39,6 +39,23 @@ def test_actual_proxy_chunk_sizes():
     assert protocol.parse_notification(FULL_STATUS[40:])["pause_remaining"] == 40
 
 
+def test_false_trailer_at_notification_boundary_keeps_pending_frame():
+    packet = frame(bytes.fromhex("520a07ea09050c000306100102003200280000173b01c5ccca0102"))
+    split = packet.index(b"\xc5\xcc\xca") + 3
+    protocol = AromaLinkBleProtocol()
+    assert protocol.parse_notification(packet[:split]) == {}
+    assert protocol.parse_notification(packet[split:])["pause_remaining"] == 40
+
+
+def test_upstream_frequency_register_reads_configuration_separately():
+    packet = frame(bytes.fromhex("5206000032003c11") + bytes.fromhex("000a007810") * 4)
+    protocol = AromaLinkBleProtocol()
+    assert protocol.parse_notification(packet[:20]) == {}
+    assert protocol.parse_notification(packet[20:]) == {
+        "work_seconds": 50, "pause_seconds": 60, "schedule_enabled": True,
+    }
+
+
 @pytest.mark.parametrize("cmd", [0x52, 0x53])
 @pytest.mark.parametrize("value,expected", [(0x10, True), (0, False)])
 def test_fan_read_response_and_push(cmd, value, expected):

@@ -87,6 +87,12 @@ async def async_get_config_entry_diagnostics(
             "connection_mode": device.connection_mode if device else None,
             "live_updates": device.live_updates if device else None,
 
+            "ble_write_response": device.ble_write_response if device else None,
+            "ble_last_update": (
+                device.ble_last_update.isoformat()
+                if device and device.ble_last_update else None
+            ),
+            "periodic_refresh": device.supports_periodic_refresh if device else None,
             "supports_fan": device.supports_fan if device else None,
             "supports_cloud": device.supports_cloud if device else None,
         },
