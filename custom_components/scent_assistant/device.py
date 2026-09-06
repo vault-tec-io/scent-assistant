@@ -346,15 +346,20 @@ class ScentDiffuserDevice:
                 _LOGGER.debug("BLE connecting to %s", self._ble_name)
                 # Prefer the BLEDevice cached by HA's bluetooth
                 # integration (it carries the right adapter / proxy
-                # routing info); fall back to a plain MAC string if the
-                # device hasn't been observed recently.
-                target = self._ble_address
+                # routing info). The retry connector requires a BLEDevice,
+                # not an address string, even before discovery is ready.
                 if self._hass is not None:
-                    cached = bluetooth.async_ble_device_from_address(
+                    target = bluetooth.async_ble_device_from_address(
                         self._hass, self._ble_address, connectable=True,
                     )
-                    if cached is not None:
-                        target = cached
+                else:
+                    target = await BleakScanner.find_device_by_address(
+                        self._ble_address, timeout=DEFAULT_CONNECT_TIMEOUT,
+                    )
+                if target is None:
+                    _LOGGER.debug("Waiting for Bluetooth discovery of %s", self._ble_name)
+                    self._ble_last_failure_ts = loop.time()
+                    return False
                 # Use bleak_retry_connector for robust connection
                 # establishment (handles transient failures with
                 # exponential backoff and is required by HA's bluetooth

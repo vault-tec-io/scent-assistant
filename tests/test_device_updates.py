@@ -193,6 +193,7 @@ async def test_transport_connect_and_reconnect(monkeypatch):
         return client
 
     monkeypatch.setattr(device_module, "establish_connection", connect)
+    monkeypatch.setattr(device_module.BleakScanner, "find_device_by_address", AsyncMock(return_value=Mock()))
     device = ScentDiffuserDevice(ble_address="00:00:00:00:00:01", device_type=DeviceType.AROMA_LINK, live_updates=True)
     device._ble_send = AsyncMock(return_value=True)
     assert await device._ble_connect()
@@ -204,6 +205,24 @@ async def test_transport_connect_and_reconnect(monkeypatch):
     assert await device._ble_connect()
     assert len(clients) == 2
     assert device._ble_send.await_count == 2
+    await device.async_shutdown()
+
+
+async def test_startup_waits_for_ha_bluetooth_discovery(monkeypatch):
+    target = Mock()
+    lookup = Mock(side_effect=[None, target])
+    connect = AsyncMock()
+    client = connect.return_value
+    client.is_connected = True
+    monkeypatch.setattr(device_module.bluetooth, "async_ble_device_from_address", lookup)
+    monkeypatch.setattr(device_module, "establish_connection", connect)
+    device = ScentDiffuserDevice(hass=Mock(), ble_address="00:00:00:00:00:01", device_type=DeviceType.AROMA_LINK, live_updates=True)
+    device._ble_send = AsyncMock(return_value=True)
+    assert not await device._ble_connect()
+    connect.assert_not_awaited()
+    device._ble_last_failure_ts = 0
+    assert await device._ble_connect()
+    assert connect.call_args.args[1] is target
     await device.async_shutdown()
 
 
